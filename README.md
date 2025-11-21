@@ -2,7 +2,7 @@ Projet pédagogique d'analyse spatio-temporelle (NYC) utilisant PySpark, Docker 
  
 ## Description
 Pipeline ETL Spark pour :
-- Ingestion de données météo (NOAA GSOD) et qualité de l'air (Socrata).
+- Ingestion de données météo (NOAA GSOD) et qualité de l'air.
 - Nettoyage, enrichissement géographique (lat/lon), agrégations temporelles.
 - Export en Parquet pour un dashboard Streamlit/folium.
  
