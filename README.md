@@ -48,12 +48,6 @@ Pipeline ETL Spark pour :
   - Visualisations : cartes (folium / pydeck), graphiques temporels (altair / matplotlib), filtres interactifs.
   - Utilise des caches (st.cache) pour éviter des relectures coûteuses.
  
-## Points d'attention / conseils de maintenance
-- Variables d'environnement Spark (mémoire, cores) sont configurable dans docker-compose et scripts d'init.
-- Vérifier le partitionnement lors de l'écriture Parquet pour éviter trop de petits fichiers.
-- Externaliser les secrets (API Socrata) hors du dépôt, utiliser des variables d'environnement.
-- Tester les transformations critiques avec petits jeux de données et unit tests PyTest si nécessaire.
- 
 ## Où regarder pour comprendre rapidement le code
 1. work/Projet_BigData_analyse_spatio_temporelle.ipynb — lecture séquentielle des étapes ETL.
 2. docker/spark-submit/ — comment le pipeline est lancé en production/containerisé.
