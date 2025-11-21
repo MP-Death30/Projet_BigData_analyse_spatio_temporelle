@@ -24,8 +24,10 @@ Pipeline ETL Spark pour :
    docker-compose up -d
 3. Soumettre le job Spark via le conteneur pyspark_notebook et exécuter les cellules du notebook dans le conteneur Jupyter.
 4. Lancer le dashboard (si app.py généré) :
-   streamlit run app.py
- 
+   1. ouvrer un terminale dans le container
+   2. cd work
+   3. streamlit run app.py
+   
 ## Explication du code (ce qui est implémenté et où chercher)
 - Notebook principal (work/Projet_BigData_analyse_spatio_temporelle.ipynb)
   - Étapes présentes : ingestion, nettoyage, transformation, jointures spatiales, agrégations temporelles, écriture en Parquet.
