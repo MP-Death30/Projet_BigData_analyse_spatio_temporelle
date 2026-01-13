@@ -1,4 +1,5 @@
 hadoop.env
+venv/
  
 # 1. On ignore tout le contenu du dossier data par défaut
 

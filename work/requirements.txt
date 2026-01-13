@@ -7,3 +7,5 @@ folium
 plotly
 requests
 pyarrow
+requests
+openpyxl
