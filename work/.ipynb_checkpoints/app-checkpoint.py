@@ -14,6 +14,26 @@ import time
 # Assurez-vous que le fichier rte_layer.py est bien dans le même dossier
 import rte_layer
 
+# ==========================================
+# CONFIGURATION & STYLES
+# ==========================================
+st.set_page_config(layout="wide", page_title="Big Data Dashboard")
+
+# Palette de couleurs "RTE Style"
+RTE_COLORS = {
+    'Nucléaire': '#F5B301',    # Jaune Or
+    'Hydraulique': '#2772B2',  # Bleu
+    'Eolien': '#72CBB7',       # Vert d'eau
+    'Solaire': '#F27405',      # Orange
+    'Gaz': '#F05B5B',          # Rouge/Saumon
+    'Bioénergies': '#16A085',  # Vert foncé
+    'Charbon': '#333333',      # Noir/Gris
+    'Fioul': '#8E44AD',        # Violet
+    'Pompage': '#2C3E50'       # Gris foncé
+}
+
+
+
 # ==============================================================================
 # CONFIGURATION GLOBALE (Doit être la première commande Streamlit)
 # ==============================================================================
@@ -450,50 +470,73 @@ if app_mode == "NYC Air Quality (Batch)":
                 st.write("Pas de données pour les distributions.")
 
 # ==========================================
-# APP 2 : RTE (MODIFIÉ POUR ID/SECRET)
+# APP 2 : RTE (DATALAKE INCREMENTAL)
 # ==========================================
 elif app_mode == "RTE Production (Speed)":
-    st.title("⚡ RTE - Mix Électrique France")
+    st.title("⚡ Mix Électrique France (Qualité Données)")
     
-    st.markdown("### 🔐 Authentification API")
-    st.info("Entrez vos identifiants RTE (Application 'Actual Generation')")
-
-    # --- NOUVEAU : 2 CHAMPS SÉPARÉS ---
-    col1, col2 = st.columns(2)
-    with col1:
-        client_id = st.text_input("Client ID", type="default", help="Ex: 8695d4b9-...")
-    with col2:
-        client_secret = st.text_input("Client Secret", type="password", help="Ex: 54174d...")
-
-    if st.button("Charger les données"):
-        with st.spinner("Fusion Historique + API en cours..."):
+    # CONTROLES
+    col_btn, col_auto = st.sidebar.columns(2)
+    if col_btn.button("Forcer Mise à jour"):
+        with st.spinner("Téléchargement & Remplacement des ND..."):
+            df, msg = rte_layer.update_datalake()
+            st.session_state['rte_data'] = df
+            if "✅" in msg: st.sidebar.success(msg)
+            else: st.sidebar.error(msg)
             
-            # On passe les deux champs séparément
-            resultat = rte_layer.merge_data(client_id, client_secret)
-            
-            if isinstance(resultat, tuple):
-                df_final, msg = resultat
-            else:
-                df_final, msg = resultat, None
+    auto_refresh = col_auto.checkbox("Auto (15min)")
+    if auto_refresh:
+        time.sleep(900)
+        st.rerun()
 
-            if isinstance(df_final, pd.DataFrame) and not df_final.empty:
-                st.session_state['rte_data'] = df_final
-                st.success(f"✅ Données récupérées : {len(df_final)} points.")
-                if msg: st.info(f"Info : {msg}")
-            else:
-                st.error("❌ Echec.")
-                if msg: st.warning(f"Détail : {msg}")
+    # CHARGEMENT
+    if 'rte_data' not in st.session_state:
+        df_disk = rte_layer.get_data()
+        if df_disk.empty:
+            st.warning("Initialisation...")
+            df_disk, msg = rte_layer.update_datalake()
+        st.session_state['rte_data'] = df_disk
 
-    if 'rte_data' in st.session_state:
+    # VISUALISATION
+    if 'rte_data' in st.session_state and not st.session_state['rte_data'].empty:
         data = st.session_state['rte_data']
-        if isinstance(data, pd.DataFrame) and not data.empty:
-            last_date = data.index.max()
-            start_view = last_date - pd.Timedelta(days=7)
-            df_view = data[data.index >= start_view]
+        last_dt = data.index.max()
+        
+        # --- ANALYSE QUALITÉ (ND) ---
+        # On regarde les dernières 24h pour voir s'il y a des trous
+        recent_data = data[data.index >= (last_dt - pd.Timedelta(hours=24))]
+        # Compte le nombre de cellules vides (NaN) dans les colonnes de production
+        prod_cols = [c for c in data.columns if c in RTE_COLORS and c != 'Consommation']
+        missing_count = recent_data[prod_cols].isna().sum().sum()
+        
+        # KPI ROW
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Dernier Timestamp", last_dt.strftime('%H:%M'))
+        
+        # KPI Qualité
+        if missing_count == 0:
+            k2.metric("Qualité Données (24h)", "✅ Optimale", "0 ND")
+        else:
+            k2.metric("Qualité Données (24h)", "⚠️ Partielle", f"{missing_count} valeurs 'ND'")
+            st.warning(f"Attention : {missing_count} points de données sont encore marqués 'ND' (Non Défini). Ils seront corrigés lors des prochaines mises à jour.")
+
+        # Recup dernière ligne VALIDE (sans NaN sur le total)
+        valid_rows = data.dropna(subset=prod_cols, how='all')
+        if not valid_rows.empty:
+            last_row = valid_rows.iloc[-1]
+            total_prod = last_row[prod_cols].sum()
+            k3.metric("Production Totale", f"{total_prod/1000:.1f} GW")
+            k4.metric("Solaire", f"{last_row.get('Solaire', 0)/1000:.1f} GW")
             
-            st.subheader(f"Mix Électrique (Semaine du {start_view.date()} au {last_date.date()})")
-            fig = px.area(df_view, x=df_view.index, y=df_view.columns, labels={"value": "Puissance (MW)", "variable": "Source"})
+            # GRAPH
+            st.subheader("Flux Énergétique (7 Jours)")
+            df_view = data.tail(4 * 24 * 7)
+            
+            fig = px.area(df_view, x=df_view.index, y=prod_cols, color_discrete_map=RTE_COLORS)
+            if 'Consommation' in df_view.columns:
+                fig.add_trace(go.Scatter(x=df_view.index, y=df_view['Consommation'], mode='lines', name='Conso', line=dict(color='black')))
             st.plotly_chart(fig, use_container_width=True)
             
-            with st.expander("Données brutes"):
-                st.dataframe(data.sort_index(ascending=False))
+            # TABLEAU (Mise en évidence des NaN)
+            with st.expander("Inspecter les données (Les ND apparaissent comme vide ou NaN)"):
+                st.dataframe(data.sort_index(ascending=False).style.highlight_null(color='red'))
