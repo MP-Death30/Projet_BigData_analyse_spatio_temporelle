@@ -5,66 +5,100 @@ import io
 import os
 import numpy as np
 import urllib3
+import re
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 DATA_URL = "https://eco2mix.rte-france.com/download/eco2mix/eCO2mix_RTE_En-cours-TR.zip"
 DATALAKE_PATH = "rte_datalake.parquet"
 
+# Mapping aligné sur les colonnes RÉELLES
 COLUMNS_MAPPING = {
-    'Nucléaire': 'Nucléaire', 'Gaz': 'Gaz', 'Charbon': 'Charbon', 
-    'Fioul': 'Fioul', 'Hydraulique': 'Hydraulique', 'Pompage': 'Pompage',
-    'Eolien': 'Eolien', 'Solaire': 'Solaire', 'Bioénergies': 'Bioénergies',
+    'Nucléaire': 'Nucléaire',
+    'Gaz': 'Gaz',
+    'Charbon': 'Charbon', 
+    'Fioul': 'Fioul',
+    'Hydraulique': 'Hydraulique',
+    'Pompage': 'Pompage',
+    'Eolien': 'Eolien',
+    'Solaire': 'Solaire',
+    'Bioénergies': 'Bioénergies',
     'Consommation': 'Consommation'
 }
 
 def download_and_clean():
     print(f"--- DL: {DATA_URL} ---")
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         r = requests.get(DATA_URL, headers=headers, timeout=60, verify=False)
         r.raise_for_status()
         
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-            target = [f for f in z.namelist() if 'xls' in f.lower() or 'txt' in f.lower()][0]
+            target = [f for f in z.namelist() if 'xls' in f.lower()][0]
             with z.open(target) as f:
-                # LECTURE INTELLIGENTE (sep=None permet l'autodétection)
-                df = pd.read_csv(f, sep=None, encoding='latin-1', skipfooter=1, engine='python')
+                # Lecture brute pour sécuriser le typage
+                df = pd.read_csv(
+                    f, 
+                    sep='\t', 
+                    encoding='cp1252', 
+                    skipfooter=1, 
+                    engine='python',
+                    na_values=['ND', 'Nd', 'nd', '-', ''],
+                    dtype=str
+                )
 
+        # Nettoyage des noms de colonnes
         df.columns = df.columns.str.strip()
-        print(f"Colonnes brutes trouvées : {list(df.columns)}")
 
-        # Construction Date
-        if 'Date' in df.columns and 'Heures' in df.columns:
-            df['Datetime'] = pd.to_datetime(df['Date'] + ' ' + df['Heures'], dayfirst=True, errors='coerce')
-            df = df.dropna(subset=['Datetime']).set_index('Datetime')
-        else:
-            return pd.DataFrame(), f"ERREUR STRUCTURE: Colonnes Date/Heures introuvables. Colonnes vues: {list(df.columns)}"
+        # --- 1. LOGIQUE DE RÉALIGNEMENT (Si décalage détecté) ---
+        if 'Nature' in df.columns:
+            sample_val = df['Nature'].dropna().iloc[0] if not df['Nature'].dropna().empty else ""
+            if re.match(r'^\d{4}-\d{2}-\d{2}$', str(sample_val)):
+                print("⚠️ DÉCALAGE DÉTECTÉ : Réalignement des colonnes...")
+                cols = df.columns.tolist()
+                # On saute la colonne 'Nature' (vide) et on décale tout vers la gauche
+                new_columns = [cols[0]] + cols[2:] + ['_TRASH_COLUMN']
+                
+                if len(new_columns) == len(df.columns):
+                    df.columns = new_columns
+                    df = df.drop(columns=['_TRASH_COLUMN'], errors='ignore')
 
-        # Nettoyage
-        df = df.replace(['ND', 'Nd', 'nd', '-', ''], np.nan)
+        # --- 2. CONVERSION TEMPORELLE ---
+        df = df.dropna(subset=['Date', 'Heures'])
+        df['Datetime'] = pd.to_datetime(df['Date'] + ' ' + df['Heures'], format='%Y-%m-%d %H:%M', errors='coerce')
+        df = df.dropna(subset=['Datetime']).set_index('Datetime').sort_index()
 
-        # Mapping
+        # --- 3. CONVERSION NUMÉRIQUE & MAPPING ---
         final_df = pd.DataFrame(index=df.index)
         found_cols = []
+        
         for src, dest in COLUMNS_MAPPING.items():
             if src in df.columns:
                 final_df[dest] = pd.to_numeric(df[src], errors='coerce')
                 found_cols.append(dest)
         
-        # LOGIQUE DE SURVIE
-        # Si on a trouvé très peu de colonnes, c'est suspect
-        if len(found_cols) == 0:
-            return pd.DataFrame(), "ERREUR MAPPING: Aucune colonne d'énergie reconnue."
+        if not found_cols:
+            return pd.DataFrame(), "ERREUR MAPPING: Aucune colonne d'énergie trouvée."
 
-        # Filtrage Consommation (SEULEMENT SI ELLE EXISTE)
-        if 'Consommation' in final_df.columns:
-            final_df = final_df.dropna(subset=['Consommation'])
-        
-        final_df = final_df.fillna(0)
+        # Nettoyage doublons index
         final_df = final_df[~final_df.index.duplicated(keep='last')]
 
-        return final_df.sort_index(), None
+        # --- 4. FILTRAGE ---
+        # A. On ne garde que le passé (pour éviter les ND prévisionnels futurs)
+        now = pd.Timestamp.now()
+        final_df = final_df[final_df.index <= now]
+
+        # B. Filtre de qualité sur la Consommation
+        if 'Consommation' in final_df.columns:
+            # On supprime les lignes où la conso est NaN (ND)
+            final_df = final_df.dropna(subset=['Consommation'])
+            # On supprime les lignes où la conso est < 1 (Valeurs aberrantes ou nulles)
+            final_df = final_df[final_df['Consommation'] >= 1]
+            
+        # C. Remplissage des trous restants (sur les autres colonnes)
+        final_df = final_df.fillna(0)
+
+        return final_df, None
 
     except Exception as e:
         return pd.DataFrame(), f"Exception Technique : {str(e)}"
@@ -77,22 +111,30 @@ def update_datalake():
     if os.path.exists(DATALAKE_PATH):
         try:
             df_old = pd.read_parquet(DATALAKE_PATH)
-            # Fusion
+            # Fusion : df_new écrase df_old sur les périodes communes
             df_final = df_new.combine_first(df_old)
         except:
             df_final = df_new
     else:
         df_final = df_new
 
+    # --- SÉCURITÉ PARQUET ---
+    # Filtrage strict des colonnes pour éviter les crashs PyArrow (types mixtes)
+    allowed_cols = list(COLUMNS_MAPPING.values())
+    df_final = df_final[df_final.columns.intersection(allowed_cols)]
+
     # Nettoyage final
     if 'Consommation' in df_final.columns:
-        df_final = df_final.dropna(subset=['Consommation'])
+        df_final = df_final[df_final['Consommation'] >= 1]
         
     df_final = df_final.fillna(0)
     df_final = df_final[~df_final.index.duplicated(keep='last')]
     
+    # Sauvegarde
     df_final.sort_index().to_parquet(DATALAKE_PATH)
-    return df_final, f"✅ OK ({len(df_final)} lignes). Dernier point: {df_final.index.max()}"
+    
+    last_date = df_final.index.max()
+    return df_final, f"✅ OK ({len(df_final)} lignes). Dernier point : {last_date}"
 
 def get_data():
     if os.path.exists(DATALAKE_PATH):

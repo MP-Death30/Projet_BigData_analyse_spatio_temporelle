@@ -19,18 +19,18 @@ import rte_layer
 # ==========================================
 st.set_page_config(layout="wide", page_title="Big Data Dashboard")
 
-# Palette de couleurs "RTE Style"
+# Palette de couleurs "RTE Style" - Optimisée pour la visibilité
 RTE_COLORS = {
-    'Nucléaire': '#F5B301',    # Or/Jaune
-    'Hydraulique': '#2772B2',  # Bleu
-    'Eolien': '#72CBB7',       # Vert d'eau
-    'Solaire': '#F27405',      # Orange
-    'Gaz': '#F05B5B',          # Rouge
-    'Bioénergies': '#16A085',  # Vert Fougère
-    'Charbon': '#333333',      # Noir
-    'Fioul': '#8E44AD',        # Violet
-    'Pompage': '#2C3E50',      # Bleu Nuit
-    'Consommation': '#000000'  # Noir (Ligne)
+    'Nucléaire': '#FFD700',      # Or/Jaune (plus visible)
+    'Hydraulique': '#1E90FF',    # Bleu
+    'Eolien': '#32CD32',         # Vert lime (plus visible que le vert d'eau)
+    'Solaire': '#FF8C00',        # Orange foncé (plus visible)
+    'Gaz': '#FF6347',            # Rouge tomate
+    'Bioénergies': '#8B4513',    # Marron
+    'Charbon': '#2F4F4F',        # Gris ardoise foncé
+    'Fioul': '#8B0000',          # Rouge foncé
+    'Pompage': '#4169E1',        # Bleu royal
+    'Consommation': '#000000'    # Noir (Ligne)
 }
 
 
@@ -492,39 +492,136 @@ elif app_mode == "RTE Production":
     data = st.session_state.get('rte_data', pd.DataFrame())
 
     if not data.empty:
-        # 1. KPIs
-        last_row = data.iloc[-1]
-        prod_cols = [c for c in data.columns if c in RTE_COLORS and c != 'Consommation']
-        total_prod = last_row[prod_cols].sum()
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Production", f"{total_prod:,.0f} MW")
-        c2.metric("Consommation", f"{last_row.get('Consommation',0):,.0f} MW")
-        c3.metric("Nucléaire", f"{last_row.get('Nucléaire',0):,.0f} MW")
-
-        # 2. GRAPHIQUE
-        st.subheader("Production & Consommation")
-        fig = px.area(data, x=data.index, y=prod_cols, color_discrete_map=RTE_COLORS)
+        # ---------------------------------------------------------
+        # 0. AUTO-TRUNCATE (COUPURE INTELLIGENTE)
+        # ---------------------------------------------------------
+        # On coupe le dataset à la dernière "vraie" valeur connue pour éviter
+        # que les KPIs n'affichent 0 sur les dernières lignes (souvent incomplètes).
         if 'Consommation' in data.columns:
-            fig.add_trace(go.Scatter(x=data.index, y=data['Consommation'], mode='lines', name='Conso', line=dict(color='black')))
-        st.plotly_chart(fig, use_container_width=True)
+            # On cherche le dernier index où la conso est > 1 MW
+            valid_idx = data[data['Consommation'] > 1].index
+            if not valid_idx.empty:
+                last_valid_dt = valid_idx.max()
+                data = data.loc[:last_valid_dt]
 
-        # 3. DONUT
-        pie_data = last_row[prod_cols]
-        pie_data = pie_data[pie_data > 0]
-        fig_pie = go.Figure(data=[go.Pie(labels=pie_data.index, values=pie_data.values, hole=.5, marker=dict(colors=[RTE_COLORS.get(x) for x in pie_data.index]))])
-        fig_pie.update_layout(height=300, margin=dict(t=0,b=0,l=0,r=0))
-        st.sidebar.plotly_chart(fig_pie, use_container_width=True)
+        # ---------------------------------------------------------
+        # 1. FILTRES TEMPORELS (SIDEBAR)
+        # ---------------------------------------------------------
+        st.sidebar.markdown("---")
+        st.sidebar.header("📅 Filtrage Temporel")
+        
+        min_ts = data.index.min()
+        max_ts = data.index.max()
+        
+        if pd.isnull(min_ts) or pd.isnull(max_ts):
+             st.warning("Données temporelles invalides.")
+             st.stop()
+
+        # Sélecteur de période (Par défaut : les 7 derniers jours pour la lisibilité)
+        default_start = max_ts.date() - pd.Timedelta(days=7)
+        if default_start < min_ts.date(): default_start = min_ts.date()
+
+        date_range = st.sidebar.date_input(
+            "Période",
+            value=(default_start, max_ts.date()),
+            min_value=min_ts.date(),
+            max_value=max_ts.date()
+        )
+        
+        # Application du filtre Date
+        data_filtered = data.copy()
+        if len(date_range) == 2:
+            start_d, end_d = date_range
+            # Filtre inclusive
+            mask = (data_filtered.index.date >= start_d) & (data_filtered.index.date <= end_d)
+            data_filtered = data_filtered[mask]
+        
+        if data_filtered.empty:
+            st.warning(f"Aucune donnée sur la période : {date_range}")
+        else:
+            # ---------------------------------------------------------
+            # 2. KPIs (Basés sur la DERNIÈRE ligne VALIDÉE)
+            # ---------------------------------------------------------
+            last_row = data_filtered.iloc[-1]
+            last_time_str = last_row.name.strftime('%d/%m/%Y %H:%M')
+            
+            prod_cols = [c for c in data.columns if c in RTE_COLORS and c != 'Consommation']
+            total_prod = last_row[prod_cols].sum()
+            
+            st.markdown(f"### Situation au {last_time_str}")
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Production", f"{total_prod:,.0f} MW")
+            c2.metric("Consommation", f"{last_row.get('Consommation',0):,.0f} MW")
+            
+            # Calcul du solde Import/Export (approximatif : Prod - Conso)
+            balance = total_prod - last_row.get('Consommation',0)
+            c3.metric("Solde (Indicatif)", f"{balance:+,.0f} MW", delta_color="normal")
+            
+            # Co2 (Si dispo dans le fichier source, sinon Taux approx ou Nucléaire)
+            c4.metric("Nucléaire", f"{last_row.get('Nucléaire',0):,.0f} MW")
+
+            # ---------------------------------------------------------
+            # 3. GRAPHIQUE (AIRE EMPILÉE)
+            # ---------------------------------------------------------
+            st.subheader("Évolution du Mix Électrique")
+            
+            # On enlève les colonnes vides pour le graphe
+            cols_to_plot = [c for c in prod_cols if data_filtered[c].sum() > 0]
+            
+            fig = px.area(
+                data_filtered, 
+                x=data_filtered.index, 
+                y=cols_to_plot, 
+                color_discrete_map=RTE_COLORS
+            )
+            
+            if 'Consommation' in data_filtered.columns:
+                fig.add_trace(go.Scatter(
+                    x=data_filtered.index, 
+                    y=data_filtered['Consommation'], 
+                    mode='lines', 
+                    name='Consommation', 
+                    line=dict(color='black', width=3)
+                ))
+            
+            fig.update_layout(
+                margin=dict(l=0, r=0, t=10, b=0), 
+                height=450,
+                legend=dict(orientation="h", y=1.02, x=0)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ---------------------------------------------------------
+            # 4. DONUT & DÉTAILS
+            # ---------------------------------------------------------
+            pie_data = last_row[cols_to_plot]
+            pie_data = pie_data[pie_data > 0].sort_values(ascending=False)
+            
+            col_pie, col_table = st.columns([1, 2])
+            
+            with col_pie:
+                st.markdown("#### Répartition (Instant T)")
+                fig_pie = go.Figure(data=[go.Pie(
+                    labels=pie_data.index, 
+                    values=pie_data.values, 
+                    hole=.4, 
+                    textinfo='label+percent',
+                    marker=dict(colors=[RTE_COLORS.get(x, '#333') for x in pie_data.index])
+                )])
+                fig_pie.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=300, showlegend=False)
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+            with col_table:
+                st.markdown("#### Données Brutes (Dernières 24h)")
+                # Affiche les 5 dernières lignes inversées
+                st.dataframe(
+                    data_filtered.tail(24).sort_index(ascending=False), 
+                    use_container_width=True,
+                    height=300
+                )
 
     else:
-        # --- BLOC DIAGNOSTIC CRITIQUE ---
-        st.error("⚠️ AUCUNE DONNÉE À AFFICHER")
-        st.warning("Diagnostic technique :")
-        
-        # Test existence fichier
-        if os.path.exists("rte_datalake.parquet"):
-            st.write("Le fichier `rte_datalake.parquet` existe mais semble vide ou illisible.")
-        else:
-            st.write("Le fichier `rte_datalake.parquet` n'existe pas encore.")
-            
-        st.info("👉 Cliquez sur le bouton 'Forcer Mise à jour' dans la barre latérale pour lancer le diagnostic réseau.")
+        # DIAGNOSTIC
+        st.error("⚠️ Données RTE indisponibles.")
+        st.info("Utilisez le bouton 'Forcer Mise à jour' pour initialiser le Datalake.")
