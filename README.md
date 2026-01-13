@@ -1,60 +1,71 @@
-Projet pédagogique d'analyse spatio-temporelle (NYC) utilisant PySpark, Docker et Streamlit.
- 
-## Description
-Pipeline ETL Spark pour :
-- Ingestion de données météo (NOAA GSOD) et qualité de l'air (Socrata).
-- Nettoyage, enrichissement géographique (lat/lon), agrégations temporelles.
-- Export en Parquet pour un dashboard Streamlit/folium.
- 
-## Structure du dépôt (principaux fichiers)
-- work/Projet_BigData_analyse_spatio_temporelle.ipynb — Notebook principal qui orchestre l'ETL et génère l'application Streamlit.
-- work/requirements.txt — Dépendances Python pour Jupyter / Streamlit.
-- docker-compose.yml — Démarrage des services Spark (master/worker), notebook et services auxiliaires.
-- build-images.sh — Script local de build des images Docker utilisées dans la stack.
-- docker/ — Dockerfiles et scripts d'init (spark-master, spark-worker, pyspark_notebook, spark-submit).
-- docker/spark-submit/ — Conteneur et script d'aide pour soumettre des jobs Spark depuis une image dédiée.
-- app.py (généré par le notebook) — Dashboard Streamlit utilisant les Parquet produits.
- 
-## Comment exécuter (rapide)
-1. Construire les images :
-   docker-compose build
-   ou
-   sh build-images.sh
-2. Démarrer la stack :
-   docker-compose up -d
-3. Soumettre le job Spark via le conteneur pyspark_notebook et exécuter les cellules du notebook dans le conteneur Jupyter.
-4. Lancer le dashboard (si app.py généré) :
-   1. ouvrer un terminale dans le container
-   2. cd work
-   3. streamlit run app.py
-   
-## Explication du code (ce qui est implémenté et où chercher)
-- Notebook principal (work/Projet_BigData_analyse_spatio_temporelle.ipynb)
-  - Étapes présentes : ingestion, nettoyage, transformation, jointures spatiales, agrégations temporelles, écriture en Parquet.
-  - Utilise l'API PySpark DataFrame : lecture via spark.read (CSV / JSON), transformations avec select/withColumn/filter, agrégations avec groupBy/agg.
-  - UDFs / fonctions utilitaires : conversion d'unités (°F → °C, mph → m/s), parsing de dates, calculs de distance basés sur lat/lon.
-  - Optimisations : persist/cache des DataFrames lourds, repartition avant écriture, partitionnement par date/zone pour lecture efficace.
- 
-- Scripts de soumission (docker/spark-submit/)
-  - Entrée pour spark-submit avec variables d'environnement (MASTER URL, path de l'application).
-  - Exemple d'usage dans docker-compose pour exécuter des jobs batch vers le cluster Spark.
- 
-- Dockerfiles et scripts d'init (docker/)
-  - Images contiennent Spark configuré (master/worker) et les dépendances Python pour exécuter le notebook et Streamlit.
-  - Scripts start-master/start-worker configurent les paramètres réseau et options Spark.
- 
-- app.py (Streamlit)
-  - Lecture des Parquet produits par l'ETL.
-  - Visualisations : cartes (folium / pydeck), graphiques temporels (altair / matplotlib), filtres interactifs.
-  - Utilise des caches (st.cache) pour éviter des relectures coûteuses.
- 
-## Points d'attention / conseils de maintenance
-- Variables d'environnement Spark (mémoire, cores) sont configurable dans docker-compose et scripts d'init.
-- Vérifier le partitionnement lors de l'écriture Parquet pour éviter trop de petits fichiers.
-- Externaliser les secrets (API Socrata) hors du dépôt, utiliser des variables d'environnement.
-- Tester les transformations critiques avec petits jeux de données et unit tests PyTest si nécessaire.
- 
-## Où regarder pour comprendre rapidement le code
-1. work/Projet_BigData_analyse_spatio_temporelle.ipynb — lecture séquentielle des étapes ETL.
-2. docker/spark-submit/ — comment le pipeline est lancé en production/containerisé.
-3. app.py généré — comment sont consommés les résultats ETL pour le dashboard.
+# Projet Big Data : Analyse Spatio-Temporelle (NYC & RTE)
+
+Ce projet propose une architecture hybride de traitement de données :
+1.  **Batch Processing (NYC)** : Analyse historique de la qualité de l'air et de la météo à New York (Spark/Hadoop).
+2.  **Speed Layer (RTE)** : Monitoring quasi-temps réel du mix électrique français et des échanges transfrontaliers (Pandas/Streamlit).
+
+## Architecture & Fonctionnalités
+
+### 1. Module NYC (Air Quality & Weather)
+Pipeline ETL distribué utilisant **PySpark** sur Docker.
+* **Sources** : NOAA GSOD (Météo) & Socrata (Air Quality NYC).
+* **Traitements** : Nettoyage, jointures spatiales (lat/lon), agrégations temporelles.
+* **Sortie** : Fichiers Parquet optimisés pour le dashboard.
+
+### 2. Module RTE (Mix Électrique France)
+Pipeline léger et incrémental pour le suivi énergétique.
+* **Source** : API RTE éCO2mix (Zip/CSV).
+* **Logique** :
+    * Récupération incrémentale des données (Datalake Parquet local).
+    * Détection automatique des structures de fichiers (TSV/CSV).
+    * Visualisation des flux d'énergie (Production par filière, Solde Import/Export).
+* **Nouveauté** : Carte interactive des échanges commerciaux avec les pays frontaliers (Flèches Import/Export).
+
+## Structure du dépôt
+
+* `work/`
+    * `Projet_BigData_analyse_spatio_temporelle.ipynb` : Orchestrateur principal (ETL Spark).
+    * `app.py` : Application **Streamlit** (Dashboard unique pour les deux modules).
+    * `rte_layer.py` : Script de gestion des données RTE (Téléchargement, Nettoyage, Stockage).
+    * `dashboard_*.parquet/geojson` : Données traitées prêtes à l'emploi.
+* `docker/` : Configuration des conteneurs (Spark Master, Worker, Jupyter).
+* `docker-compose.yml` : Définition de la stack complète.
+
+## Installation & Démarrage
+
+### Pré-requis
+* Docker & Docker Compose installés.
+
+### Lancement Rapide
+1.  **Construire et lancer la stack** :
+    ```bash
+    sh build-images.sh
+    docker-compose up -d
+    ```
+
+2.  **Générer les données (Si première utilisation)** :
+    * Accédez au notebook via `http://localhost:8888` (token dans les logs).
+    * Exécutez le notebook pour générer les fichiers Parquet de NYC.
+    * *Note : Le module RTE se mettra à jour automatiquement depuis l'interface Streamlit.*
+
+3.  **Lancer le Dashboard** :
+    ```bash
+    # Accès au conteneur
+    docker exec -it pyspark_notebook bash
+    
+    # Dans le conteneur :
+    cd work
+    streamlit run app.py
+    ```
+    * Accédez ensuite à `http://localhost:8501`.
+
+## Guide d'Utilisation du Dashboard
+
+* **Navigation** : Utilisez la barre latérale pour basculer entre "NYC Air Quality" et "RTE Production".
+* **Module RTE** :
+    * Cliquez sur le bouton **"Forcer Mise à jour"** pour télécharger les dernières données temps réel.
+    * Visualisez la carte des échanges : Les flèches **Vertes** indiquent un Import (France acheteuse), les flèches **Rouges/Bleues** un Export (France vendeuse).
+
+## Maintenance
+* **RTE Layer** : Le script `rte_layer.py` gère les changements de format de l'API RTE. En cas de colonne manquante, vérifiez le mapping dans ce fichier.
+* **Spark** : Ajustez la mémoire dans `docker-compose.yml` si le traitement NYC échoue (OOM).

@@ -22,6 +22,7 @@ def download_and_clean():
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
             target = [f for f in z.namelist() if 'xls' in f.lower() or 'csv' in f.lower()][0]
             with z.open(target) as f:
+                # Tentative de lecture flexible (séparateur auto ou tab)
                 try:
                     df = pd.read_csv(
                         f, 
@@ -44,9 +45,10 @@ def download_and_clean():
                         dtype=str
                     )
 
+        # Nettoyage des noms de colonnes
         df.columns = df.columns.str.strip()
 
-        # --- 1. LOGIQUE DE RÉALIGNEMENT ---
+        # --- LOGIQUE DE RÉALIGNEMENT (Si colonne Nature décale tout) ---
         if 'Nature' in df.columns:
             sample_val = df['Nature'].dropna().iloc[0] if not df['Nature'].dropna().empty else ""
             if re.match(r'^\d{4}-\d{2}-\d{2}$', str(sample_val)):
@@ -56,15 +58,16 @@ def download_and_clean():
                     df.columns = new_columns
                     df = df.drop(columns=['_TRASH_COLUMN'], errors='ignore')
 
-        # --- 2. CONVERSION TEMPORELLE ---
+        # --- CONVERSION TEMPORELLE ---
         if 'Date' not in df.columns or 'Heures' not in df.columns:
-            return pd.DataFrame(), f"ERREUR STRUCTURE: Colonnes Date/Heures manquantes."
+            return pd.DataFrame(), "ERREUR STRUCTURE: Colonnes Date/Heures manquantes."
 
         df = df.dropna(subset=['Date', 'Heures'])
         df['Datetime'] = pd.to_datetime(df['Date'] + ' ' + df['Heures'], format='%Y-%m-%d %H:%M', errors='coerce')
         df = df.dropna(subset=['Datetime']).set_index('Datetime').sort_index()
 
-        # --- 3. CONVERSION NUMÉRIQUE ---
+        # --- CONVERSION NUMÉRIQUE (TOUTES COLONNES) ---
+        # On ne filtre plus via une liste blanche restreinte. On garde tout ce qui est numérique.
         cols_metadata = ['Date', 'Heures', 'Nature', 'Périmètre']
         cols_to_convert = [c for c in df.columns if c not in cols_metadata]
         
@@ -76,10 +79,7 @@ def download_and_clean():
         # Nettoyage doublons index
         final_df = final_df[~final_df.index.duplicated(keep='last')]
 
-        # --- 4. FILTRAGE (CORRIGÉ) ---
-        # Suppression du filtre 'now' qui causait le bug Timezone (UTC vs Paris)
-        # On filtre uniquement sur la validité de la Consommation (Les prévisions futures sont souvent vides ou ND)
-        
+        # --- FILTRAGE ---
         if 'Consommation' in final_df.columns:
             final_df = final_df.dropna(subset=['Consommation'])
             final_df = final_df[final_df['Consommation'] >= 1]
@@ -99,18 +99,21 @@ def update_datalake():
     if os.path.exists(DATALAKE_PATH):
         try:
             df_old = pd.read_parquet(DATALAKE_PATH)
+            # Fusion intelligente : on garde les colonnes existantes et nouvelles
             df_final = df_new.combine_first(df_old)
         except:
             df_final = df_new
     else:
         df_final = df_new
 
+    # Nettoyage final
     if 'Consommation' in df_final.columns:
         df_final = df_final[df_final['Consommation'] >= 1]
         
     df_final = df_final.fillna(0)
     df_final = df_final[~df_final.index.duplicated(keep='last')]
     
+    # Sauvegarde
     df_final.sort_index().to_parquet(DATALAKE_PATH)
     
     last_date = df_final.index.max()

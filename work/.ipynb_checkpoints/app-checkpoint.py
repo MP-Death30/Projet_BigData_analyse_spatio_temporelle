@@ -11,6 +11,7 @@ import signal
 import time
 
 # Module local pour la couche Speed (RTE)
+# Assurez-vous que le fichier rte_layer.py est bien dans le même dossier
 import rte_layer
 
 # ==========================================
@@ -18,18 +19,28 @@ import rte_layer
 # ==========================================
 st.set_page_config(layout="wide", page_title="Big Data Dashboard")
 
-# Palette de couleurs "RTE Style"
+# Palette de couleurs "RTE Style" - Optimisée pour la visibilité
 RTE_COLORS = {
-    'Nucléaire': '#FFD700',      
-    'Hydraulique': '#1E90FF',    
-    'Eolien': '#32CD32',         
-    'Solaire': '#FF8C00',        
-    'Gaz': '#FF6347',            
-    'Bioénergies': '#8B4513',    
-    'Charbon': '#2F4F4F',        
-    'Fioul': '#8B0000',          
-    'Pompage': '#4169E1',        
-    'Consommation': '#000000'    
+    'Nucléaire': '#FFD700',      # Or/Jaune (plus visible)
+    'Hydraulique': '#1E90FF',    # Bleu
+    'Eolien': '#32CD32',         # Vert lime (plus visible que le vert d'eau)
+    'Solaire': '#FF8C00',        # Orange foncé (plus visible)
+    'Gaz': '#FF6347',            # Rouge tomate
+    'Bioénergies': '#8B4513',    # Marron
+    'Charbon': '#2F4F4F',        # Gris ardoise foncé
+    'Fioul': '#8B0000',          # Rouge foncé
+    'Pompage': '#4169E1',        # Bleu royal
+    'Consommation': '#000000'    # Noir (Ligne)
+}
+
+# Coordonnées approximatives pour la carte des échanges
+COUNTRY_COORDS = {
+    'France': [46.603354, 1.888334],
+    'Angleterre': [51.5074, -0.1278],
+    'Espagne': [40.4168, -3.7038],
+    'Italie': [41.9028, 12.4964],
+    'Suisse': [46.8182, 8.2275],
+    'Allemagne-Belgique': [50.8503, 4.3517] # Centré vers Bruxelles pour le groupe
 }
 
 # ==============================================================================
@@ -43,6 +54,8 @@ app_mode = st.sidebar.radio("Choisir l'application", ["NYC Air Quality", "RTE Pr
 # ==============================================================================
 if app_mode == "NYC Air Quality":
     
+    # --- VOTRE CODE NYC (INDENTÉ) ---
+    
     # Initialisation des états
     if 'selected_geocode' not in st.session_state:
         st.session_state.selected_geocode = None
@@ -52,6 +65,7 @@ if app_mode == "NYC Air Quality":
     # 2. FONCTIONS UTILITAIRES
     @st.cache_data
     def load_data():
+        # Chargement des données (chemins relatifs)
         if not os.path.exists("dashboard_map.geojson"):
             st.error("Fichier dashboard_map.geojson introuvable.")
             return None, None, None, None
@@ -60,8 +74,9 @@ if app_mode == "NYC Air Quality":
         air = pd.read_parquet("dashboard_data_air.parquet")
         weather = pd.read_parquet("dashboard_data_weather.parquet")
         
-        # NETTOYAGE
+        # --- NETTOYAGE & CONVERSIONS ---
         geo['GEOCODE'] = geo['GEOCODE'].astype(str)
+        
         if 'LATITUDE_ZONE' not in geo.columns:
             try:
                 geo_temp = geo.to_crs(epsg=2263)
@@ -74,11 +89,12 @@ if app_mode == "NYC Air Quality":
         air['DATE_OBSERVATION'] = pd.to_datetime(air['DATE_OBSERVATION'])
         weather['DATE'] = pd.to_datetime(weather['DATE'])
         
-        # CONVERSIONS
+        # --- CONVERSION UNITÉS (Impérial -> Métrique) ---
         weather['TEMP'] = (weather['TEMP'] - 32) * 5.0/9.0
         weather['DEWP'] = (weather['DEWP'] - 32) * 5.0/9.0
         weather['WDSP'] = weather['WDSP'] * 1.852
 
+        # --- FILTRAGE VALEURS EXTRÊMES ---
         weather = weather[weather['WDSP'] <= 150]
         weather = weather[weather['DEWP'] <= 40]
         
@@ -137,6 +153,7 @@ if app_mode == "NYC Air Quality":
     geo, df_air, df_weather, df_stations = load_data()
 
     if geo is not None:
+        # --- BOUTON D'ARRÊT ---
         st.sidebar.header("⚙️ Contrôle")
         if st.sidebar.button("🛑 Arrêter le Dashboard"):
             st.sidebar.warning("Arrêt du serveur en cours...")
@@ -146,11 +163,13 @@ if app_mode == "NYC Air Quality":
         st.sidebar.markdown("---")
         st.sidebar.header("🎛️ Filtres & Paramètres")
 
+        # Dates
         min_date, max_date = df_air['DATE_OBSERVATION'].min(), df_air['DATE_OBSERVATION'].max()
         start_date, end_date = st.sidebar.date_input(
             "Période d'analyse", [min_date, max_date], min_value=min_date, max_value=max_date
         )
 
+        # Filtre Polluants
         mask_air_date = (df_air['DATE_OBSERVATION'].dt.date >= start_date) & (df_air['DATE_OBSERVATION'].dt.date <= end_date)
         df_air_filtered = df_air[mask_air_date]
 
@@ -163,17 +182,21 @@ if app_mode == "NYC Air Quality":
             st.sidebar.error("⚠️ Aucune donnée de pollution pour cette période.")
             selected_polluant = None
 
+        # Autres Filtres
         radius = st.sidebar.slider("Rayon des stations météo (km)", 1, 100, 15)
         meteo_vars = ['Température', 'Vitesse Vent', 'Point de Rosée']
         selected_meteo_vars = st.sidebar.multiselect("Graphiques Météo (Comparaison & Boxplots)", meteo_vars, default=['Température'])
 
+        # 4. ETL A LA VOLÉE
         if selected_polluant is None:
             st.warning("Veuillez élargir la plage de dates.")
             st.stop()
 
+        # Filtre Météo
         mask_weather_date = (df_weather['DATE'].dt.date >= start_date) & (df_weather['DATE'].dt.date <= end_date)
         df_weather_filtered = df_weather[mask_weather_date]
 
+        # --- INDICATEUR SIDEBAR ---
         with st.sidebar:
             st.markdown("---")
             st.markdown("### ℹ️ Info Stations")
@@ -201,6 +224,7 @@ if app_mode == "NYC Air Quality":
                     else:
                         st.metric(f"Stations (Quartier, {radius} km)", 0)
 
+        # --- PRÉPARATION DONNÉES CARTE ---
         df_air_map = df_air_filtered[df_air_filtered['NOM_POLLUANT'] == selected_polluant]
         if not df_air_map.empty:
             air_agg = df_air_map.groupby('GEOJOIN_ID')['VALEUR'].mean().reset_index()
@@ -219,38 +243,48 @@ if app_mode == "NYC Air Quality":
         gdf_display['W_TEMP'] = gdf_display['W_TEMP'].fillna(0)
         gdf_display['NB_STATIONS'] = gdf_display['NB_STATIONS'].fillna(0).astype(int)
 
+        # --- PRÉPARATION DONNÉES GRAPHIQUES & KPIs ---
         current_title = ""
         current_caption = ""
         avg_polluant, avg_temp, avg_wind = 0, 0, 0
+
         chart_air_src = pd.DataFrame()
         chart_weather_src = pd.DataFrame()
 
         if st.session_state.selected_geocode is None:
+            # GLOBAL
             current_title = "New York City (Global)"
             current_caption = "Moyenne de tous les quartiers"
+            
             valid_data = gdf_display[gdf_display['MEAN_POLLUANT'] > 0]
             if not valid_data.empty:
                 avg_polluant = valid_data['MEAN_POLLUANT'].mean()
                 avg_temp = valid_data['W_TEMP'].replace(0, np.nan).mean()
                 avg_wind = valid_data['W_WIND'].replace(0, np.nan).mean()
+            
             chart_air_src = df_air_filtered[df_air_filtered['NOM_POLLUANT'] == selected_polluant].copy()
             chart_weather_src = df_weather_filtered.copy()
         else:
+            # LOCAL
             current_geo_data = gdf_display[gdf_display['GEOCODE'] == st.session_state.selected_geocode].iloc[0]
             current_title = current_geo_data['GEONAME']
             current_caption = f"Borough: {current_geo_data['BOROUGH']} | Stations locales : {int(current_geo_data['NB_STATIONS'])}"
+            
             avg_polluant = current_geo_data['MEAN_POLLUANT']
             avg_temp = current_geo_data['W_TEMP']
             avg_wind = current_geo_data['W_WIND']
+            
             chart_air_src = df_air_filtered[
                 (df_air_filtered['GEOJOIN_ID'] == st.session_state.selected_geocode) & 
                 (df_air_filtered['NOM_POLLUANT'] == selected_polluant)
             ].copy()
+            
             lat_q, lon_q = current_geo_data['LATITUDE_ZONE'], current_geo_data['LONGITUDE_ZONE']
             dists = haversine_vectorized(lon_q, lat_q, df_stations['LONGITUDE'].values, df_stations['LATITUDE'].values)
             nearby_ids = df_stations[dists <= radius]['ID_STATION'].unique()
             chart_weather_src = df_weather_filtered[df_weather_filtered['ID_STATION'].isin(nearby_ids)].copy()
 
+        # RESAMPLING
         delta_days = (end_date - start_date).days
         resample_rule = 'D'
         if delta_days > 730: resample_rule = 'Q'
@@ -267,11 +301,13 @@ if app_mode == "NYC Air Quality":
         else:
             chart_weather_final = pd.DataFrame()
 
+        # 5. UI PRINCIPALE (PARTIE HAUTE)
         col_map, col_details = st.columns([3, 2])
 
         with col_map:
             st.subheader(f"Carte : {selected_polluant}")
             m = folium.Map(location=[40.7128, -74.0060], zoom_start=10, tiles="CartoDB positron")
+
             choropleth = folium.Choropleth(
                 geo_data=gdf_display,
                 data=gdf_display,
@@ -284,6 +320,7 @@ if app_mode == "NYC Air Quality":
                 highlight=True
             )
             choropleth.add_to(m)
+
             style_function = lambda x: {'fillColor': '#ffffff', 'color':'#000000', 'fillOpacity': 0.0, 'weight': 0.1}
             tooltip_layer = folium.GeoJson(
                 gdf_display,
@@ -294,8 +331,10 @@ if app_mode == "NYC Air Quality":
                     localize=True
                 )
             ).add_to(m)
+
             st_map = st_folium(m, width=None, height=650)
             
+            # Synchro Clic
             geo_options_df = geo[['GEOCODE', 'GEONAME']].sort_values('GEONAME')
             if st_map and st_map.get('last_object_clicked'):
                 last_clicked = st_map['last_object_clicked']
@@ -336,6 +375,7 @@ if app_mode == "NYC Air Quality":
             kpi3.metric("Vent Moy", val_w)
 
             st.markdown("---")
+            
             st.subheader("📈 Analyses Temporelles")
             st.markdown(f"**Tendance : {selected_polluant}**")
             
@@ -359,6 +399,7 @@ if app_mode == "NYC Air Quality":
             else:
                 st.info("Pas de données suffisantes pour afficher l'évolution.")
 
+        # 6. SECTION ANALYSE MÉTÉO (BAS DE PAGE)
         st.markdown("---")
         st.subheader("☁️ Analyse Météo")
 
@@ -441,7 +482,6 @@ elif app_mode == "RTE Production":
     # CONTROLES
     if st.sidebar.button("Forcer Mise à jour (Requis pour échanges)"):
         with st.spinner("Téléchargement des données (Toutes colonnes)..."):
-            # On force le reload du module si nécessaire (simple appel ici)
             df, msg = rte_layer.update_datalake()
             st.session_state['rte_data'] = df
             if "✅" in msg: st.sidebar.success(msg)
@@ -562,63 +602,82 @@ elif app_mode == "RTE Production":
                     height=300
                 )
 
-            # 5. DIAGRAMMES IMPORTS / EXPORTS
+            # ------------------------------------------------------------------
+            # 5. CARTE DES ÉCHANGES (NOUVELLE SECTION)
+            # ------------------------------------------------------------------
             st.markdown("---")
-            st.subheader("🌍 Échanges Commerciaux (Import/Export)")
+            st.subheader("🌍 Carte des Échanges Frontaliers")
 
-            # Recherche des colonnes d'échange (Tolérance sur le nom)
+            # Identification dynamique des colonnes d'échange
             exch_cols = [c for c in last_row.index if "Ech." in c and ("comm." in c or "Pays" in c or len(c) > 5)]
-            # Exclure 'Ech. physiques' si présent car redondant avec comm
             exch_cols = [c for c in exch_cols if "physique" not in c.lower()]
 
             if exch_cols:
-                imports = {}
-                exports = {}
+                # Création de la carte centrée sur la France
+                m_exch = folium.Map(location=[46.6, 2.2], zoom_start=5, tiles="CartoDB positron")
                 
+                # Ajout du marqueur "France" (Centre)
+                folium.Marker(
+                    COUNTRY_COORDS['France'],
+                    popup="France (Centre)",
+                    icon=folium.Icon(color='blue', icon='home')
+                ).add_to(m_exch)
+
+                found_any = False
                 for c in exch_cols:
                     val = last_row[c]
-                    # Nettoyage du nom
-                    country = c.replace("Ech. comm. ", "").replace("Ech. comm.", "").strip()
+                    # Nettoyage du nom pour matcher les clés de COUNTRY_COORDS
+                    # Ex: "Ech. comm. Angleterre" -> "Angleterre"
+                    country_key = c.replace("Ech. comm. ", "").replace("Ech. comm.", "").strip()
                     
-                    # RTE : Positif = Import (Solde Importateur), Négatif = Export (Solde Exportateur)
-                    if val > 0:
-                        imports[country] = val
-                    elif val < 0:
-                        exports[country] = abs(val) 
-                
-                c_imp, c_exp = st.columns(2)
-                
-                with c_imp:
-                    st.markdown("#### 📥 Imports (Nous achetons)")
-                    if imports:
-                        fig_imp = px.pie(
-                            values=list(imports.values()),
-                            names=list(imports.keys()),
-                            title=f"Total: {sum(imports.values()):,.0f} MW",
-                            hole=0.3
-                        )
-                        fig_imp.update_traces(textinfo='label+percent+value')
-                        st.plotly_chart(fig_imp, use_container_width=True)
-                    else:
-                        st.info("Aucun import significatif à cet instant.")
+                    if country_key in COUNTRY_COORDS:
+                        found_any = True
+                        coord_neighbor = COUNTRY_COORDS[country_key]
+                        coord_france = COUNTRY_COORDS['France']
+                        
+                        # RTE : Positif = Import (Solde Importateur) -> Vers la France
+                        # RTE : Négatif = Export (Solde Exportateur) -> Vers le Voisin
+                        
+                        if val > 0: # IMPORT (Vert, Flèche vers France)
+                            color = 'green'
+                            direction_str = f"📥 Import de {country_key}"
+                            # Ligne
+                            folium.PolyLine([coord_neighbor, coord_france], color=color, weight=3, opacity=0.8).add_to(m_exch)
+                            # Marqueur sur le voisin avec flèche "Sortante" de chez lui (ou entrante chez nous ?)
+                            # Pour être clair : Flèche "Down" = In (Import)
+                            folium.Marker(
+                                coord_neighbor,
+                                icon=folium.Icon(color=color, icon='arrow-down'),
+                                tooltip=f"{direction_str}: {val:,.0f} MW"
+                            ).add_to(m_exch)
+                            
+                        elif val < 0: # EXPORT (Rouge, Flèche vers Voisin)
+                            color = 'red'
+                            direction_str = f"📤 Export vers {country_key}"
+                            # Ligne
+                            folium.PolyLine([coord_france, coord_neighbor], color=color, weight=3, opacity=0.8).add_to(m_exch)
+                            # Marqueur sur le voisin avec flèche "Up" = Out (Export)
+                            folium.Marker(
+                                coord_neighbor,
+                                icon=folium.Icon(color=color, icon='arrow-up'),
+                                tooltip=f"{direction_str}: {abs(val):,.0f} MW"
+                            ).add_to(m_exch)
+                        else:
+                            # Echange nul
+                            folium.Marker(
+                                coord_neighbor,
+                                icon=folium.Icon(color='gray', icon='minus'),
+                                tooltip=f"Echange nul avec {country_key}"
+                            ).add_to(m_exch)
 
-                with c_exp:
-                    st.markdown("#### 📤 Exports (Nous vendons)")
-                    if exports:
-                        fig_exp = px.pie(
-                            values=list(exports.values()),
-                            names=list(exports.keys()),
-                            title=f"Total: {sum(exports.values()):,.0f} MW",
-                            hole=0.3
-                        )
-                        fig_exp.update_traces(textinfo='label+percent+value')
-                        st.plotly_chart(fig_exp, use_container_width=True)
-                    else:
-                        st.info("Aucun export significatif à cet instant.")
+                if found_any:
+                    st_folium(m_exch, width=None, height=500)
+                    st.caption("🟢 Vert/Flèche Bas = Import (Nous achetons) | 🔴 Rouge/Flèche Haut = Export (Nous vendons)")
+                else:
+                    st.warning("Pays voisins non reconnus dans les données.")
             else:
                 st.error("⚠️ Les données d'échanges ('Ech. comm.') sont introuvables.")
-                st.info("💡 Cliquez sur 'Forcer Mise à jour' dans le menu pour recharger les données complètes.")
-                st.write(f"Colonnes disponibles : {list(last_row.index)}")
+                st.info("💡 Cliquez sur 'Forcer Mise à jour' pour recharger les données complètes.")
 
     else:
         st.error("⚠️ Données RTE indisponibles.")
