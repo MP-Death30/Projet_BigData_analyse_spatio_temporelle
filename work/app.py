@@ -21,15 +21,16 @@ st.set_page_config(layout="wide", page_title="Big Data Dashboard")
 
 # Palette de couleurs "RTE Style"
 RTE_COLORS = {
-    'Nucléaire': '#F5B301',    # Jaune Or
+    'Nucléaire': '#F5B301',    # Or/Jaune
     'Hydraulique': '#2772B2',  # Bleu
     'Eolien': '#72CBB7',       # Vert d'eau
     'Solaire': '#F27405',      # Orange
-    'Gaz': '#F05B5B',          # Rouge/Saumon
-    'Bioénergies': '#16A085',  # Vert foncé
-    'Charbon': '#333333',      # Noir/Gris
+    'Gaz': '#F05B5B',          # Rouge
+    'Bioénergies': '#16A085',  # Vert Fougère
+    'Charbon': '#333333',      # Noir
     'Fioul': '#8E44AD',        # Violet
-    'Pompage': '#2C3E50'       # Gris foncé
+    'Pompage': '#2C3E50',      # Bleu Nuit
+    'Consommation': '#000000'  # Noir (Ligne)
 }
 
 
@@ -43,12 +44,12 @@ st.set_page_config(layout="wide", page_title="Projet Big Data - NYC & RTE")
 # NAVIGATION (SIDEBAR)
 # ==============================================================================
 st.sidebar.title("Navigation")
-app_mode = st.sidebar.radio("Choisir l'application", ["NYC Air Quality (Batch)", "RTE Production (Speed)"])
+app_mode = st.sidebar.radio("Choisir l'application", ["NYC Air Quality", "RTE Production"])
 
 # ==============================================================================
 # APPLICATION 1 : NYC AIR QUALITY (BATCH)
 # ==============================================================================
-if app_mode == "NYC Air Quality (Batch)":
+if app_mode == "NYC Air Quality":
     
     # --- VOTRE CODE NYC (INDENTÉ) ---
     
@@ -472,71 +473,58 @@ if app_mode == "NYC Air Quality (Batch)":
 # ==========================================
 # APP 2 : RTE (DATALAKE INCREMENTAL)
 # ==========================================
-elif app_mode == "RTE Production (Speed)":
-    st.title("⚡ Mix Électrique France (Qualité Données)")
-    
+elif app_mode == "RTE Production":
+    st.title("⚡ Mix Électrique France")
+
     # CONTROLES
-    col_btn, col_auto = st.sidebar.columns(2)
-    if col_btn.button("Forcer Mise à jour"):
-        with st.spinner("Téléchargement & Remplacement des ND..."):
+    if st.sidebar.button("Forcer Mise à jour"):
+        with st.spinner("Téléchargement..."):
             df, msg = rte_layer.update_datalake()
             st.session_state['rte_data'] = df
             if "✅" in msg: st.sidebar.success(msg)
             else: st.sidebar.error(msg)
-            
-    auto_refresh = col_auto.checkbox("Auto (15min)")
-    if auto_refresh:
-        time.sleep(900)
-        st.rerun()
 
     # CHARGEMENT
     if 'rte_data' not in st.session_state:
-        df_disk = rte_layer.get_data()
-        if df_disk.empty:
-            st.warning("Initialisation...")
-            df_disk, msg = rte_layer.update_datalake()
-        st.session_state['rte_data'] = df_disk
+        st.session_state['rte_data'] = rte_layer.get_data()
 
-    # VISUALISATION
-    if 'rte_data' in st.session_state and not st.session_state['rte_data'].empty:
-        data = st.session_state['rte_data']
-        last_dt = data.index.max()
-        
-        # --- ANALYSE QUALITÉ (ND) ---
-        # On regarde les dernières 24h pour voir s'il y a des trous
-        recent_data = data[data.index >= (last_dt - pd.Timedelta(hours=24))]
-        # Compte le nombre de cellules vides (NaN) dans les colonnes de production
+    # --- AFFICHAGE OU DIAGNOSTIC ---
+    data = st.session_state.get('rte_data', pd.DataFrame())
+
+    if not data.empty:
+        # 1. KPIs
+        last_row = data.iloc[-1]
         prod_cols = [c for c in data.columns if c in RTE_COLORS and c != 'Consommation']
-        missing_count = recent_data[prod_cols].isna().sum().sum()
+        total_prod = last_row[prod_cols].sum()
         
-        # KPI ROW
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Dernier Timestamp", last_dt.strftime('%H:%M'))
-        
-        # KPI Qualité
-        if missing_count == 0:
-            k2.metric("Qualité Données (24h)", "✅ Optimale", "0 ND")
-        else:
-            k2.metric("Qualité Données (24h)", "⚠️ Partielle", f"{missing_count} valeurs 'ND'")
-            st.warning(f"Attention : {missing_count} points de données sont encore marqués 'ND' (Non Défini). Ils seront corrigés lors des prochaines mises à jour.")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Production", f"{total_prod:,.0f} MW")
+        c2.metric("Consommation", f"{last_row.get('Consommation',0):,.0f} MW")
+        c3.metric("Nucléaire", f"{last_row.get('Nucléaire',0):,.0f} MW")
 
-        # Recup dernière ligne VALIDE (sans NaN sur le total)
-        valid_rows = data.dropna(subset=prod_cols, how='all')
-        if not valid_rows.empty:
-            last_row = valid_rows.iloc[-1]
-            total_prod = last_row[prod_cols].sum()
-            k3.metric("Production Totale", f"{total_prod/1000:.1f} GW")
-            k4.metric("Solaire", f"{last_row.get('Solaire', 0)/1000:.1f} GW")
+        # 2. GRAPHIQUE
+        st.subheader("Production & Consommation")
+        fig = px.area(data, x=data.index, y=prod_cols, color_discrete_map=RTE_COLORS)
+        if 'Consommation' in data.columns:
+            fig.add_trace(go.Scatter(x=data.index, y=data['Consommation'], mode='lines', name='Conso', line=dict(color='black')))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 3. DONUT
+        pie_data = last_row[prod_cols]
+        pie_data = pie_data[pie_data > 0]
+        fig_pie = go.Figure(data=[go.Pie(labels=pie_data.index, values=pie_data.values, hole=.5, marker=dict(colors=[RTE_COLORS.get(x) for x in pie_data.index]))])
+        fig_pie.update_layout(height=300, margin=dict(t=0,b=0,l=0,r=0))
+        st.sidebar.plotly_chart(fig_pie, use_container_width=True)
+
+    else:
+        # --- BLOC DIAGNOSTIC CRITIQUE ---
+        st.error("⚠️ AUCUNE DONNÉE À AFFICHER")
+        st.warning("Diagnostic technique :")
+        
+        # Test existence fichier
+        if os.path.exists("rte_datalake.parquet"):
+            st.write("Le fichier `rte_datalake.parquet` existe mais semble vide ou illisible.")
+        else:
+            st.write("Le fichier `rte_datalake.parquet` n'existe pas encore.")
             
-            # GRAPH
-            st.subheader("Flux Énergétique (7 Jours)")
-            df_view = data.tail(4 * 24 * 7)
-            
-            fig = px.area(df_view, x=df_view.index, y=prod_cols, color_discrete_map=RTE_COLORS)
-            if 'Consommation' in df_view.columns:
-                fig.add_trace(go.Scatter(x=df_view.index, y=df_view['Consommation'], mode='lines', name='Conso', line=dict(color='black')))
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # TABLEAU (Mise en évidence des NaN)
-            with st.expander("Inspecter les données (Les ND apparaissent comme vide ou NaN)"):
-                st.dataframe(data.sort_index(ascending=False).style.highlight_null(color='red'))
+        st.info("👉 Cliquez sur le bouton 'Forcer Mise à jour' dans la barre latérale pour lancer le diagnostic réseau.")
