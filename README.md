@@ -1,71 +1,116 @@
-# Projet Big Data : Analyse Spatio-Temporelle (NYC & RTE)
+# 🌍 Dashboard Big Data : Analyse Spatio-Temporelle
 
-Ce projet propose une architecture hybride de traitement de données :
-1.  **Batch Processing (NYC)** : Analyse historique de la qualité de l'air et de la météo à New York (Spark/Hadoop).
-2.  **Speed Layer (RTE)** : Monitoring quasi-temps réel du mix électrique français et des échanges transfrontaliers (Pandas/Streamlit).
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+![Spark](https://img.shields.io/badge/Apache%20Spark-3.5-orange)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.30-red)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED)
 
-## Architecture & Fonctionnalités
+Ce projet est une plateforme d'analyse de données Big Data combinant traitement distribué (Spark) et visualisation interactive (Streamlit). Il démontre l'intégration d'un Datalake (HDFS) avec une application front-end pour l'analyse de données environnementales et énergétiques.
 
-### 1. Module NYC (Air Quality & Weather)
-Pipeline ETL distribué utilisant **PySpark** sur Docker.
-* **Sources** : NOAA GSOD (Météo) & Socrata (Air Quality NYC).
-* **Traitements** : Nettoyage, jointures spatiales (lat/lon), agrégations temporelles.
-* **Sortie** : Fichiers Parquet optimisés pour le dashboard.
+## 🚀 Fonctionnalités
 
-### 2. Module RTE (Mix Électrique France)
-Pipeline léger et incrémental pour le suivi énergétique.
-* **Source** : API RTE éCO2mix (Zip/CSV).
-* **Logique** :
-    * Récupération incrémentale des données (Datalake Parquet local).
-    * Détection automatique des structures de fichiers (TSV/CSV).
-    * Visualisation des flux d'énergie (Production par filière, Solde Import/Export).
-* **Nouveauté** : Carte interactive des échanges commerciaux avec les pays frontaliers (Flèches Import/Export).
+Le dashboard propose deux modules d'analyse distincts :
 
-## Structure du dépôt
+### 1. 🗽 NYC Air Quality (Batch Processing)
+Analyse historique de la qualité de l'air à New York croisée avec les données météorologiques.
+* **Cartographie interactive** : Visualisation des niveaux de pollution par quartier (Choropleth map).
+* **Croisement de données** : Corrélation entre polluants (Ozone, PM2.5, etc.) et météo (Vent, Température).
+* **Calcul distribué** : Agrégations spatiales complexes réalisées via PySpark.
 
-* `work/`
-    * `Projet_BigData_analyse_spatio_temporelle.ipynb` : Orchestrateur principal (ETL Spark).
-    * `app.py` : Application **Streamlit** (Dashboard unique pour les deux modules).
-    * `rte_layer.py` : Script de gestion des données RTE (Téléchargement, Nettoyage, Stockage).
-    * `dashboard_*.parquet/geojson` : Données traitées prêtes à l'emploi.
-* `docker/` : Configuration des conteneurs (Spark Master, Worker, Jupyter).
-* `docker-compose.yml` : Définition de la stack complète.
+### 2. ⚡ RTE Production (Speed Layer / Ingestion)
+Suivi en quasi-temps réel du mix énergétique français (données éCO2mix).
+* **Pipeline ETL** : Ingestion automatique depuis l'API RTE vers HDFS (format Parquet).
+* **Visualisation** : Graphiques de production par filière, échanges frontaliers et mix énergétique.
+* **Architecture** : Mise à jour incrémentale du Datalake.
 
-## Installation & Démarrage
+---
 
-### Pré-requis
-* Docker & Docker Compose installés.
+## 🛠️ Architecture Technique
 
-### Lancement Rapide
-1.  **Construire et lancer la stack** :
-    ```bash
-    sh build-images.sh
-    docker-compose up -d
+Le projet repose sur une stack conteneurisée via Docker :
+
+| Service | Rôle | Port Accessible |
+| :--- | :--- | :--- |
+| **Spark Master** | Gestionnaire de cluster Spark | `8080` (Web UI) |
+| **Spark Worker** | Exécution des tâches distribuées | `8081` |
+| **HDFS (Namenode)** | Stockage distribué (Datalake) | `9870` |
+| **Jupyter/App** | Environnement de dév & Streamlit | `8888` (Lab) / `8501` (App) |
+
+---
+
+## 📋 Prérequis
+
+Avant de lancer le projet, assurez-vous d'avoir installé :
+* **Docker Desktop** (avec le moteur Docker en cours d'exécution).
+* **Git**.
+
+---
+
+## ⚙️ Installation et Démarrage
+
+Nous utilisons un `Makefile` pour simplifier les commandes Docker.
+
+### 1. Cloner le projet
+``` bash
+git clone [https://github.com/VOTRE_UTILISATEUR/projet_bigdata_analyse_spatio_temporelle.git](https://github.com/VOTRE_UTILISATEUR/projet_bigdata_analyse_spatio_temporelle.git)
+cd projet_bigdata_analyse_spatio_temporelle
+```
+
+### 2. Installation Automatisée
+Cette commande construit les images Docker, lance les conteneurs et initialise les données (ETL).
+* **Sous Linux / Mac :**
+    ``` bash
+    make install
     ```
-
-2.  **Générer les données (Si première utilisation)** :
-    * Accédez au notebook via `http://localhost:8888` (token dans les logs).
-    * Exécutez le notebook pour générer les fichiers Parquet de NYC.
-    * *Note : Le module RTE se mettra à jour automatiquement depuis l'interface Streamlit.*
-
-3.  **Lancer le Dashboard** :
-    ```bash
-    # Accès au conteneur
-    docker exec -it pyspark_notebook bash
-    
-    # Dans le conteneur :
-    cd work
-    streamlit run app.py
+* **Sous Windows (PowerShell) :**
+    ``` powershell
+    .\make install
     ```
-    * Accédez ensuite à `http://localhost:8501`.
+    *(Cela va exécuter `build-images.sh`, lancer `docker-compose up`, et exécuter les scripts d'initialisation dans le conteneur)*
 
-## Guide d'Utilisation du Dashboard
+### 3. Accéder à l'application
+Une fois l'installation terminée (message "✅ INSTALLATION TERMINÉE"), ouvrez votre navigateur :
 
-* **Navigation** : Utilisez la barre latérale pour basculer entre "NYC Air Quality" et "RTE Production".
-* **Module RTE** :
-    * Cliquez sur le bouton **"Forcer Mise à jour"** pour télécharger les dernières données temps réel.
-    * Visualisez la carte des échanges : Les flèches **Vertes** indiquent un Import (France acheteuse), les flèches **Rouges/Bleues** un Export (France vendeuse).
+* 📊 **Dashboard Streamlit :** [http://localhost:8501](http://localhost:8501)
+* 📓 **Jupyter Lab :** [http://localhost:8888](http://localhost:8888)
+* 🐘 **Spark Master UI :** [http://localhost:8080](http://localhost:8080)
 
-## Maintenance
-* **RTE Layer** : Le script `rte_layer.py` gère les changements de format de l'API RTE. En cas de colonne manquante, vérifiez le mapping dans ce fichier.
-* **Spark** : Ajustez la mémoire dans `docker-compose.yml` si le traitement NYC échoue (OOM).
+---
+
+## 🕹️ Commandes Utiles
+
+| Action | Commande (Linux/Mac) | Commande (Windows) |
+| :--- | :--- | :--- |
+| **Démarrer** (sans réinstaller) | `make start` | `.\make start` |
+| **Arrêter** les services | `make stop` | `.\make stop` |
+| **Redémarrer** (Reset rapide) | `make restart` | `.\make restart` |
+| **Nettoyer** (Suppr. conteneurs) | `make clean` | `.\make clean` |
+| **Shell** (Entrer dans le container) | `make shell` | `docker exec -it pyspark_notebook bash` |
+
+---
+
+## 📂 Structure du Projet
+
+```
+📦 projet_bigdata
+ ┣ 📂 docker             # Fichiers de configuration des images Docker
+ ┣ 📂 work               # Code source (monté dans le conteneur)
+ ┃ ┣ 📜 app.py           # Point d'entrée de l'application Streamlit
+ ┃ ┣ 📜 etl_batch.py     # Script ETL pour les données Batch
+ ┃ ┣ 📜 rte_layer.py     # Connecteur API RTE
+ ┃ ┗ 📂 data             # Données brutes (CSV/JSON)
+ ┣ 📜 docker-compose.yml # Orchestration des services
+ ┣ 📜 Makefile           # Automatisation des commandes
+ ┗ 📜 README.md          # Documentation
+```
+
+---
+
+## ⚠️ Dépannage (Troubleshooting)
+
+**Erreur : `JavaPackage object is not callable` ou `ConnectionRefused`**
+* Cela arrive si la session Spark est corrompue.
+* **Solution :** Cliquez sur le bouton **"🛑 Arrêter le Dashboard"** dans la barre latérale de l'application, ou lancez `make restart`. L'application redémarrera proprement la JVM.
+
+**Erreur : `Hadoop/HDFS connection refused`**
+* Assurez-vous que le conteneur `namenode` est bien en cours d'exécution via `docker ps`.
