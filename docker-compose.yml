@@ -1,0 +1,154 @@
+version: "3"
+
+services:
+  # --- HADOOP SERVICES ---
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    restart: always
+    ports:
+      - 9870:9870
+      - 9000:9000
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+      - ./myhadoop:/myhadoop
+    environment:
+      - CLUSTER_NAME=test
+    env_file:
+      - ./hadoop.env
+    networks:
+      - weather-net
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    restart: always
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+    env_file:
+      - ./hadoop.env
+    networks:
+      - weather-net
+
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: resourcemanager
+    restart: always
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864"
+    env_file:
+      - ./hadoop.env
+    networks:
+      - weather-net
+
+  nodemanager1:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
+    container_name: nodemanager
+    restart: always
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+    env_file:
+      - ./hadoop.env
+    networks:
+      - weather-net
+
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
+    container_name: historyserver
+    restart: always
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode:9864 resourcemanager:8088"
+    volumes:
+      - hadoop_historyserver:/hadoop/yarn/timeline
+    env_file:
+      - ./hadoop.env
+    networks:
+      - weather-net
+
+  # --- SPARK SERVICES ---
+  spark-master:
+    image: bde2020/spark-master:3.0.1-hadoop3.2
+    container_name: spark-master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+       - ./work:/home/jovyan/work
+    environment:
+       - "SPARK_LOCAL_IP=spark-master"
+    networks:
+      - weather-net
+
+  spark-worker:
+    image: bde2020/spark-worker:3.0.1-hadoop3.2
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MASTER=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=4G
+      - SPARK_DRIVER_MEMORY=3G
+      - SPARK_EXECUTOR_MEMORY=3G
+    volumes:
+       - ./work:/home/jovyan/work
+    networks:
+      - weather-net
+
+  # --- JUPYTER & DASHBOARD ---
+  pyspark-notebook:
+    # Utilise le Dockerfile à la racine pour installer requirements.txt
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pyspark_notebook
+    ports:
+      - "8888:8888" # Jupyter
+      - "8501:8501" # Streamlit Dashboard
+    volumes:
+      - ./work:/home/jovyan/work
+    environment:
+      PYSPARK_SUBMIT_ARGS: >
+        --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.0.1,org.apache.kafka:kafka-clients:2.6.0
+        pyspark-shell
+    networks:
+      - weather-net
+
+  # --- KAFKA SERVICES ---
+  kafka:
+    image: wurstmeister/kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CREATE_TOPICS: "weather_stream:1:1,weather_current:1:1,weather_transformed:1:1"
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+    depends_on:
+      - zookeeper
+    networks:
+      - weather-net
+
+  zookeeper:
+    image: wurstmeister/zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    networks:
+      - weather-net
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:
+  hadoop_historyserver:
+
+# Définition du réseau (automatique)
+networks:
+  weather-net:
+    driver: bridge

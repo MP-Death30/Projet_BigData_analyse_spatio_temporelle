@@ -1,0 +1,12 @@
+pandas
+numpy
+geopandas
+streamlit
+streamlit-folium
+folium
+plotly
+requests
+pyarrow
+requests
+openpyxl
+pyspark
