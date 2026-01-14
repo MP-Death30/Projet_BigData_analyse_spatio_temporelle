@@ -1,7 +1,5 @@
-import findspark
-findspark.init()
-
 import streamlit as st
+from pyspark.sql import SparkSession
 import pandas as pd
 import geopandas as gpd
 import folium
@@ -12,10 +10,7 @@ import numpy as np
 import os
 import signal
 import time
-
-# Module local pour la couche Speed (RTE)
 import rte_layer
-from pyspark.sql import SparkSession
 
 # ==========================================
 # CONFIGURATION & STYLES
@@ -26,9 +21,11 @@ st.set_page_config(layout="wide", page_title="Big Data Dashboard")
 # Indispensable pour être accessible par NYC (Batch) ET RTE (Speed/Ingestion)
 @st.cache_resource
 def get_spark_session():
+    # On force une configuration minimale pour éviter les conflits Java
     return SparkSession.builder \
-        .appName("Dashboard_App") \
+        .appName("Dashboard_NYC_RTE") \
         .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
         .getOrCreate()
 # ------------------------------------------------------
 
