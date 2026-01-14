@@ -32,28 +32,37 @@ def get_spark_session():
         .getOrCreate()
 # ------------------------------------------------------
 
-# Palette de couleurs "RTE Style"
+# --- PALETTE OFFICIELLE RTE (Approximative) ---
+# Couleurs extraites du site éCO2mix pour un rendu fidèle
 RTE_COLORS = {
-    'Nucléaire': '#FFD700',      # Or/Jaune
-    'Hydraulique': '#1E90FF',    # Bleu
-    'Eolien': '#32CD32',         # Vert lime
-    'Solaire': '#FF8C00',        # Orange foncé
-    'Gaz': '#FF6347',            # Rouge tomate
-    'Bioénergies': '#8B4513',    # Marron
-    'Charbon': '#2F4F4F',        # Gris ardoise foncé
-    'Fioul': '#8B0000',          # Rouge foncé
-    'Pompage': '#4169E1',        # Bleu royal
-    'Consommation': '#000000'    # Noir
+    'Nucléaire': '#F5D300',      # Jaune RTE
+    'Hydraulique': '#2774B8',    # Bleu RTE
+    'Eolien': '#84C66B',         # Vert clair
+    'Solaire': '#F29400',        # Orange
+    'Gaz': '#F05A28',            # Rouge orangé
+    'Bioénergies': '#166A57',    # Vert foncé
+    'Charbon': '#A0A0A0',        # Gris
+    'Fioul': '#805B50',          # Marron
+    'Pompage': '#113366',        # Bleu nuit
+    'Consommation': '#333333'    # Noir
 }
+
+# Ordre d'empilement logique (Base -> Pointe)
+STACK_ORDER = [
+    'Nucléaire', 'Hydraulique', 'Bioénergies',  # Base & Pilotable vert
+    'Eolien', 'Solaire',                        # Intermittent
+    'Gaz', 'Charbon', 'Fioul',                  # Thermique fossile (Pointe)
+    'Pompage'
+]
 
 # Coordonnées pour la carte des échanges
 COUNTRY_COORDS = {
     'France': [46.603354, 1.888334],
-    'Angleterre': [51.5074, -0.1278],
-    'Espagne': [40.4168, -3.7038],
-    'Italie': [41.9028, 12.4964],
-    'Suisse': [46.8182, 8.2275],
-    'Allemagne-Belgique': [50.8503, 4.3517]
+    'Angleterre': [51.0, 0.5],          # Décalé vers la manche pour visibilité
+    'Espagne': [42.0, -1.0],            # Proche frontière Pyrénées
+    'Italie': [44.5, 6.5],              # Proche frontière Alpes
+    'Suisse': [46.5, 6.0],              # Proche Genève
+    'Allemagne-Belgique': [50.0, 5.0]   # Frontière Nord-Est
 }
 
 # ==============================================================================
@@ -444,147 +453,277 @@ if app_mode == "NYC Air Quality":
 # APP 2 : RTE (DATALAKE INCREMENTAL)
 # ==============================================================================
 elif app_mode == "RTE Production":
-    st.title("⚡ Mix Électrique France")
+    st.title("⚡ Météo de l'Électricité (Style éCO2mix)")
 
-    if st.sidebar.button("🔄 Forcer Mise à jour (RTE)"):
-        status_text = st.sidebar.empty()
-        status_text.info("⏳ Téléchargement RTE en cours...")
+    # --- CONTROLES SIDEBAR ---
+    st.sidebar.markdown("---")
+    st.sidebar.header("Mise à jour des données")
+    if st.sidebar.button("🔄 Actualiser depuis RTE"):
+        status = st.sidebar.empty()
+        status.info("⏳ Connexion API RTE...")
         
-        # 1. Récupération des données (RAM) via module local
+        # 1. Pipeline Pandas (ETL Local)
         df_new, msg = rte_layer.get_latest_data()
         
         if df_new.empty:
-            status_text.error(f"❌ Erreur DL : {msg}")
+            status.error(f"❌ Erreur : {msg}")
         else:
-            # --- CORRECTION ICI ---
-            # On met à jour le cache de l'app pour que le graphique change TOUT DE SUITE
+            # Mise à jour immédiate du cache session
             st.session_state['rte_data'] = df_new
+            status.info(f"💾 Sauvegarde HDFS ({len(df_new)} lignes)...")
             
-            status_text.info(f"💾 Sauvegarde HDFS ({len(df_new)} lignes)...")
             try:
-                # 2. Écriture HDFS via Spark
+                # 2. Pipeline Spark (Ingestion HDFS)
                 spark = get_spark_session()
-                
-                # On prépare une copie pour Spark (qui n'aime pas les index Datetime)
-                # On ne touche pas à df_new qui sert à l'affichage
+                # Nettoyage index pour Spark
                 df_spark_ready = df_new.copy()
                 if isinstance(df_spark_ready.index, pd.DatetimeIndex):
                     df_spark_ready = df_spark_ready.reset_index()
-                    
+                
+                # Écriture
                 spark_df = spark.createDataFrame(df_spark_ready)
+                hdfs_path = "/user/mathis/datalake/raw/rte/rte_datalake.parquet"
+                spark_df.write.mode("overwrite").parquet(hdfs_path)
                 
-                hdfs_rte_path = "/user/mathis/datalake/raw/rte/rte_datalake.parquet"
-                spark_df.write.mode("overwrite").parquet(hdfs_rte_path)
-                
-                status_text.success("✅ Succès ! Données à jour.")
+                status.success("✅ Données synchronisées !")
                 time.sleep(1)
                 st.rerun()
-                
             except Exception as e:
-                status_text.error(f"❌ Erreur Écriture HDFS : {e}")
+                status.error(f"⚠️ Erreur HDFS (mais affichage OK) : {e}")
 
-    # CHARGEMENT LECTURE
+    # --- CHARGEMENT DES DONNEES ---
     if 'rte_data' not in st.session_state:
-        # On peut aussi lire HDFS ici si souhaité, 
-        # mais on garde votre logique 'rte_layer.get_data()' si elle lit en local ou HDFS.
-        # Pour être cohérent Big Data, on pourrait lire HDFS ici aussi :
+        # Essai de lecture HDFS au démarrage, sinon vide
         try:
             spark = get_spark_session()
             path = "/user/mathis/datalake/raw/rte/rte_datalake.parquet"
-            # Lecture Lazy Spark -> Pandas
-            df_rte_spark = spark.read.parquet(path).toPandas()
-            if 'Datetime' in df_rte_spark.columns:
-                df_rte_spark['Datetime'] = pd.to_datetime(df_rte_spark['Datetime'])
-                df_rte_spark = df_rte_spark.set_index('Datetime').sort_index()
-            st.session_state['rte_data'] = df_rte_spark
+            df_spark = spark.read.parquet(path).toPandas()
+            if not df_spark.empty and 'Datetime' in df_spark.columns:
+                df_spark['Datetime'] = pd.to_datetime(df_spark['Datetime'])
+                df_spark = df_spark.set_index('Datetime').sort_index()
+            st.session_state['rte_data'] = df_spark
         except:
-            # Fallback si HDFS vide
             st.session_state['rte_data'] = pd.DataFrame()
 
-    data = st.session_state.get('rte_data', pd.DataFrame())
+    data = st.session_state['rte_data']
 
+    # --- AFFICHAGE PRINCIPAL ---
     if not data.empty:
-        # Auto-Truncate
+        # Nettoyage des futurs (Consommation = 0 ou ND)
         if 'Consommation' in data.columns:
             valid_idx = data[data['Consommation'] > 1].index
             if not valid_idx.empty:
                 data = data.loc[:valid_idx.max()]
-
-        st.sidebar.markdown("---")
-        st.sidebar.header("📅 Filtrage Temporel")
         
+        # Sélecteur de date intelligent
         min_ts, max_ts = data.index.min(), data.index.max()
-        default_start = max_ts.date() - pd.Timedelta(days=7)
-        if default_start < min_ts.date(): default_start = min_ts.date()
-
-        date_range = st.sidebar.date_input("Période", value=(default_start, max_ts.date()), min_value=min_ts.date(), max_value=max_ts.date())
+        col_date, col_kpi = st.columns([1, 3])
         
-        data_filtered = data.copy()
-        if len(date_range) == 2:
-            start_d, end_d = date_range
-            mask = (data_filtered.index.date >= start_d) & (data_filtered.index.date <= end_d)
-            data_filtered = data_filtered[mask]
+        with col_date:
+            date_selected = st.date_input("Date", value=max_ts.date(), min_value=min_ts.date(), max_value=max_ts.date())
+            
+        # Filtrage sur la journée sélectionnée
+        mask = (data.index.date == date_selected)
+        df_day = data[mask]
         
-        if data_filtered.empty:
-            st.warning("Aucune donnée sur la période.")
+        if df_day.empty:
+            st.warning("Pas de données pour cette date.")
         else:
-            last_row = data_filtered.iloc[-1]
-            prod_cols = [c for c in data.columns if c in RTE_COLORS and c != 'Consommation']
-            total_prod = last_row[prod_cols].sum()
+            last_row = df_day.iloc[-1]
+            last_time = last_row.name.strftime('%H:%M')
             
-            st.markdown(f"### Situation au {last_row.name.strftime('%d/%m/%Y %H:%M')}")
+            # --- BLOC KPI (EN HAUT) ---
+            prod_cols = [c for c in STACK_ORDER if c in data.columns]
+            current_prod = last_row[prod_cols].sum()
+            current_conso = last_row.get('Consommation', 0)
             
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Production", f"{total_prod:,.0f} MW")
-            c2.metric("Consommation", f"{last_row.get('Consommation',0):,.0f} MW")
-            c3.metric("Solde", f"{(total_prod - last_row.get('Consommation',0)):+,.0f} MW")
-            c4.metric("Nucléaire", f"{last_row.get('Nucléaire',0):,.0f} MW")
+            # Calcul du Solde Exportateur (Prod - Conso - Pompage)
+            # Note: RTE calcule Solde = Exports - Imports. Ici on l'estime par Prod - Conso.
+            # Pour être précis, utilisons les colonnes "Ech. comm." si dispo
+            exch_cols = [c for c in last_row.index if "Ech." in c and ("comm." in c or "Pays" in c) and "physique" not in c.lower()]
+            current_balance = last_row[exch_cols].sum() if exch_cols else (current_prod - current_conso)
+            
+            # Couleur dynamique du solde
+            balance_color = "normal" 
+            label_balance = "Solde (Neutre)"
+            if current_balance > 0: 
+                balance_color = "inverse" # Vert (souvent import positif dans les raw data, à vérifier selon convention)
+                # Convention RTE Raw : Positif = Import, Négatif = Export
+                # Mais pour l'affichage "Exportateur", on préfère souvent dire :
+                # Si (Prod > Conso) => Exportateur.
+            
+            with col_kpi:
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Production", f"{current_prod/1000:.1f} GW")
+                k2.metric("Consommation", f"{current_conso/1000:.1f} GW")
+                k3.metric("Nucléaire", f"{last_row.get('Nucléaire', 0)/1000:.1f} GW", 
+                          f"{last_row.get('Nucléaire', 0)/current_prod*100:.0f}% du mix")
+                k4.metric("Co2 (Estimé)", f"{last_row.get('Taux de CO2', 'N/A')} g/kWh")
 
-            st.subheader("Évolution Mix")
-            fig = px.area(data_filtered, x=data_filtered.index, y=prod_cols, color_discrete_map=RTE_COLORS)
-            if 'Consommation' in data_filtered.columns:
-                fig.add_trace(go.Scatter(x=data_filtered.index, y=data_filtered['Consommation'], mode='lines', name='Consommation', line=dict(color='black')))
+            # --- GRAPHIQUE 1 : PRODUCTION PAR FILIERE (AIRE) ---
+            st.subheader(f"Production d'électricité par filière ({date_selected.strftime('%d/%m/%Y')})")
+            
+            # Préparation des données pour Plotly (Stack Order respecté)
+            cols_to_plot = [c for c in STACK_ORDER if c in df_day.columns and df_day[c].sum() > 0]
+            
+            fig = go.Figure()
+            
+            # Ajout des aires empilées
+            for col in cols_to_plot:
+                fig.add_trace(go.Scatter(
+                    x=df_day.index, y=df_day[col],
+                    mode='lines',
+                    name=col,
+                    stackgroup='one', # Ceci active l'empilement
+                    line=dict(width=0.5, color=RTE_COLORS.get(col, '#333')),
+                    fillcolor=RTE_COLORS.get(col, '#333')
+                ))
+                
+            # Ajout de la courbe de consommation par dessus
+            if 'Consommation' in df_day.columns:
+                fig.add_trace(go.Scatter(
+                    x=df_day.index, y=df_day['Consommation'],
+                    mode='lines',
+                    name='Consommation',
+                    line=dict(color='black', width=2)
+                ))
+
+            fig.update_layout(
+                height=400,
+                margin=dict(l=0, r=0, t=10, b=0),
+                legend=dict(orientation="h", y=1.1, x=0.5, xanchor='center'),
+                yaxis=dict(title="Puissance (MW)"),
+                hovermode="x unified"
+            )
             st.plotly_chart(fig, use_container_width=True)
 
+            # --- SECTION 2 : CARTE ET JAUGE (COTE A COTE) ---
             st.markdown("---")
-            col_pie, col_table = st.columns([1, 2])
-            
-            with col_pie:
+            c_map, c_gauge = st.columns([2, 1])
+
+            with c_map:
+                st.subheader("🌍 Échanges aux frontières")
+                
+                # Carte Folium
+                m = folium.Map(location=[46.6, 2.2], zoom_start=5, tiles="CartoDB positron")
+                
+                # Marqueurs Fixes
+                folium.Marker(COUNTRY_COORDS['France'], popup="France", 
+                             icon=folium.Icon(color='blue', icon='home', prefix='fa')).add_to(m)
+
+                found_exchange = False
+                if exch_cols:
+                    for c in exch_cols:
+                        val = last_row[c]
+                        # Extraction nom pays (ex: "Ech. comm. Angleterre" -> "Angleterre")
+                        country = c.replace("Ech. comm. ", "").replace("Ech. comm.", "").strip()
+                        
+                        if country in COUNTRY_COORDS:
+                            found_exchange = True
+                            coord = COUNTRY_COORDS[country]
+                            coord_fr = COUNTRY_COORDS['France']
+                            
+                            # Logique Visuelle RTE :
+                            # Import (>0) : Vert, Flèche vers la France
+                            # Export (<0) : Rouge, Flèche vers le Pays
+                            
+                            if val > 0: # IMPORT
+                                color = 'green'
+                                icon_name = 'arrow-down' # Vers le bas/centre
+                                tooltip = f"IMPORT depuis {country}: {val:,.0f} MW"
+                                # Ligne pointillée verte
+                                folium.PolyLine([coord, coord_fr], color=color, weight=3, dash_array='10').add_to(m)
+                                
+                            else: # EXPORT
+                                color = 'red'
+                                icon_name = 'arrow-up' # Vers le haut/extérieur
+                                tooltip = f"EXPORT vers {country}: {abs(val):,.0f} MW"
+                                # Ligne continue rouge
+                                folium.PolyLine([coord_fr, coord], color=color, weight=3).add_to(m)
+                            
+                            # Marqueur sur le pays voisin
+                            folium.Marker(
+                                location=coord,
+                                icon=folium.Icon(color=color, icon=icon_name, prefix='fa'),
+                                tooltip=tooltip
+                            ).add_to(m)
+                
+                st_folium(m, width=None, height=450)
+                
+                if not found_exchange:
+                    st.info("⚠️ Pas de données d'échanges frontaliers disponibles.")
+
+            with c_gauge:
+                st.subheader("⚖️ Solde Import/Export")
+                
+                # 1. Calculs
+                net_balance = last_row[exch_cols].sum() if exch_cols else 0
+                limit = 15000
+                
+                # 2. Définition Titre & Couleur
+                if net_balance < 0:
+                    title_gauge = "Exportateur Net"
+                    color_bar = "#D32F2F" # Rouge
+                    # On crée une marche qui va de la valeur à 0 (car valeur négative)
+                    active_step = {'range': [net_balance, 0], 'color': color_bar}
+                else:
+                    title_gauge = "Importateur Net"
+                    color_bar = "#388E3C" # Vert
+                    # On crée une marche qui va de 0 à la valeur
+                    active_step = {'range': [0, net_balance], 'color': color_bar}
+                
+                # 3. Construction de la Jauge
+                fig_gauge = go.Figure(go.Indicator(
+                    mode = "gauge+number+delta",
+                    value = net_balance,
+                    domain = {'x': [0, 1], 'y': [0, 1]},
+                    title = {'text': f"{title_gauge}<br><span style='font-size:0.8em;color:gray'>Flux (MW)</span>"},
+                    delta = {'reference': 0, 'increasing': {'color': "#388E3C"}, 'decreasing': {'color': "#D32F2F"}},
+                    gauge = {
+                        'axis': {'range': [-limit, limit], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                        
+                        # ASTUCE : On rend la barre officielle transparente pour la cacher
+                        'bar': {'color': "rgba(0,0,0,0)"},
+                        
+                        'bgcolor': "white",
+                        'borderwidth': 2,
+                        'bordercolor': "gray",
+                        
+                        # On définit les zones de fond + la zone active
+                        'steps': [
+                            # Fonds clairs (inchangés)
+                            {'range': [-limit, 0], 'color': "rgba(211, 47, 47, 0.15)"},  
+                            {'range': [0, limit], 'color': "rgba(56, 142, 60, 0.15)"},
+                            
+                            # La "Barre" active (qui est en fait une marche superposée)
+                            active_step
+                        ],
+                        
+                        'threshold': {
+                            'line': {'color': "black", 'width': 4},
+                            'thickness': 0.75,
+                            'value': 0 
+                        }
+                    }
+                ))
+
+                fig_gauge.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
+                st.plotly_chart(fig_gauge, use_container_width=True)
+                
+                # --- DONUT MIX (Inchangé) ---
+                st.markdown("##### Mix Instantané")
                 pie_data = last_row[prod_cols]
                 pie_data = pie_data[pie_data > 0]
-                fig_pie = go.Figure(go.Pie(labels=pie_data.index, values=pie_data.values, hole=.4, marker=dict(colors=[RTE_COLORS.get(x) for x in pie_data.index])))
-                fig_pie.update_layout(height=300, margin=dict(t=0,b=0,l=0,r=0))
+                
+                fig_pie = go.Figure(go.Pie(
+                    labels=pie_data.index, 
+                    values=pie_data.values, 
+                    hole=.5,
+                    marker=dict(colors=[RTE_COLORS.get(x, '#333') for x in pie_data.index]),
+                    textinfo='percent'
+                ))
+                fig_pie.update_layout(height=200, margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
                 st.plotly_chart(fig_pie, use_container_width=True)
 
-            with col_table:
-                st.dataframe(data_filtered.tail(24).sort_index(ascending=False), use_container_width=True, height=300)
-
-            # CARTE ECHANGES
-            st.markdown("---")
-            st.subheader("🌍 Carte des Échanges")
-            exch_cols = [c for c in last_row.index if "Ech." in c and ("comm." in c or "Pays" in c or len(c) > 5) and "physique" not in c.lower()]
-            
-            if exch_cols:
-                m_exch = folium.Map(location=[46.6, 2.2], zoom_start=5, tiles="CartoDB positron")
-                folium.Marker(COUNTRY_COORDS['France'], icon=folium.Icon(color='blue', icon='home')).add_to(m_exch)
-                
-                found_any = False
-                for c in exch_cols:
-                    val = last_row[c]
-                    country_key = c.replace("Ech. comm. ", "").replace("Ech. comm.", "").strip()
-                    if country_key in COUNTRY_COORDS:
-                        found_any = True
-                        coord_n = COUNTRY_COORDS[country_key]
-                        coord_f = COUNTRY_COORDS['France']
-                        
-                        if val > 0: # Import
-                            folium.PolyLine([coord_n, coord_f], color='green', weight=3).add_to(m_exch)
-                            folium.Marker(coord_n, icon=folium.Icon(color='green', icon='arrow-down'), tooltip=f"Import: {val:,.0f} MW").add_to(m_exch)
-                        elif val < 0: # Export
-                            folium.PolyLine([coord_f, coord_n], color='red', weight=3).add_to(m_exch)
-                            folium.Marker(coord_n, icon=folium.Icon(color='red', icon='arrow-up'), tooltip=f"Export: {abs(val):,.0f} MW").add_to(m_exch)
-                
-                if found_any:
-                    st_folium(m_exch, width=None, height=500)
     else:
-        st.warning("Données indisponibles. Lancez la mise à jour.")
+        st.info("👋 Bienvenue ! Cliquez sur le bouton 'Actualiser depuis RTE' dans la barre latérale pour charger les données.")
