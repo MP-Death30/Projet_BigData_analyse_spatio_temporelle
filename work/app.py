@@ -1,3 +1,6 @@
+import findspark
+findspark.init()
+
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
@@ -11,36 +14,46 @@ import signal
 import time
 
 # Module local pour la couche Speed (RTE)
-# Assurez-vous que le fichier rte_layer.py est bien dans le même dossier
 import rte_layer
+from pyspark.sql import SparkSession
 
 # ==========================================
 # CONFIGURATION & STYLES
 # ==========================================
 st.set_page_config(layout="wide", page_title="Big Data Dashboard")
 
-# Palette de couleurs "RTE Style" - Optimisée pour la visibilité
+# --- CORRECTION : SESSION SPARK DÉFINIE GLOBALEMENT ---
+# Indispensable pour être accessible par NYC (Batch) ET RTE (Speed/Ingestion)
+@st.cache_resource
+def get_spark_session():
+    return SparkSession.builder \
+        .appName("Dashboard_App") \
+        .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
+        .getOrCreate()
+# ------------------------------------------------------
+
+# Palette de couleurs "RTE Style"
 RTE_COLORS = {
-    'Nucléaire': '#FFD700',      # Or/Jaune (plus visible)
+    'Nucléaire': '#FFD700',      # Or/Jaune
     'Hydraulique': '#1E90FF',    # Bleu
-    'Eolien': '#32CD32',         # Vert lime (plus visible que le vert d'eau)
-    'Solaire': '#FF8C00',        # Orange foncé (plus visible)
+    'Eolien': '#32CD32',         # Vert lime
+    'Solaire': '#FF8C00',        # Orange foncé
     'Gaz': '#FF6347',            # Rouge tomate
     'Bioénergies': '#8B4513',    # Marron
     'Charbon': '#2F4F4F',        # Gris ardoise foncé
     'Fioul': '#8B0000',          # Rouge foncé
     'Pompage': '#4169E1',        # Bleu royal
-    'Consommation': '#000000'    # Noir (Ligne)
+    'Consommation': '#000000'    # Noir
 }
 
-# Coordonnées approximatives pour la carte des échanges
+# Coordonnées pour la carte des échanges
 COUNTRY_COORDS = {
     'France': [46.603354, 1.888334],
     'Angleterre': [51.5074, -0.1278],
     'Espagne': [40.4168, -3.7038],
     'Italie': [41.9028, 12.4964],
     'Suisse': [46.8182, 8.2275],
-    'Allemagne-Belgique': [50.8503, 4.3517] # Centré vers Bruxelles pour le groupe
+    'Allemagne-Belgique': [50.8503, 4.3517]
 }
 
 # ==============================================================================
@@ -54,27 +67,31 @@ app_mode = st.sidebar.radio("Choisir l'application", ["NYC Air Quality", "RTE Pr
 # ==============================================================================
 if app_mode == "NYC Air Quality":
     
-    # --- VOTRE CODE NYC (INDENTÉ) ---
-    
     # Initialisation des états
     if 'selected_geocode' not in st.session_state:
         st.session_state.selected_geocode = None
     if 'dropdown_selector' not in st.session_state:
         st.session_state.dropdown_selector = "Tous quartiers"
 
-    # 2. FONCTIONS UTILITAIRES
+    # 1. FONCTIONS CHARGEMENT & CALCULS
     @st.cache_data
     def load_data():
-        # Chargement des données (chemins relatifs)
-        if not os.path.exists("dashboard_map.geojson"):
-            st.error("Fichier dashboard_map.geojson introuvable.")
-            return None, None, None, None
-            
-        geo = gpd.read_file("dashboard_map.geojson")
-        air = pd.read_parquet("dashboard_data_air.parquet")
-        weather = pd.read_parquet("dashboard_data_weather.parquet")
+        spark = get_spark_session()
+        hdfs_base = "/user/mathis/datalake/processed/dashboard"
         
-        # --- NETTOYAGE & CONVERSIONS ---
+        # Lecture HDFS via Spark
+        # Note : On lit et on convertit en Pandas pour l'affichage
+        try:
+            air = spark.read.parquet(f"{hdfs_base}/air_quality.parquet").toPandas()
+            weather = spark.read.parquet(f"{hdfs_base}/weather.parquet").toPandas()
+        except Exception as e:
+            st.error(f"Impossible de lire les fichiers HDFS : {e}")
+            st.stop()
+            
+        # Lecture GeoJSON local (fichier statique)
+        geo = gpd.read_file("dashboard_map.geojson")
+        
+        # Nettoyage & Typage
         geo['GEOCODE'] = geo['GEOCODE'].astype(str)
         
         if 'LATITUDE_ZONE' not in geo.columns:
@@ -86,19 +103,30 @@ if app_mode == "NYC Air Quality":
             geo['LATITUDE_ZONE'] = centroids.y
             geo['LONGITUDE_ZONE'] = centroids.x
         
-        air['DATE_OBSERVATION'] = pd.to_datetime(air['DATE_OBSERVATION'])
-        weather['DATE'] = pd.to_datetime(weather['DATE'])
+        if 'DATE_OBSERVATION' in air.columns:
+            air['DATE_OBSERVATION'] = pd.to_datetime(air['DATE_OBSERVATION'])
+            
+        if 'DATE' in weather.columns:
+            weather['DATE'] = pd.to_datetime(weather['DATE'])
         
-        # --- CONVERSION UNITÉS (Impérial -> Métrique) ---
-        weather['TEMP'] = (weather['TEMP'] - 32) * 5.0/9.0
-        weather['DEWP'] = (weather['DEWP'] - 32) * 5.0/9.0
-        weather['WDSP'] = weather['WDSP'] * 1.852
-
-        # --- FILTRAGE VALEURS EXTRÊMES ---
-        weather = weather[weather['WDSP'] <= 150]
-        weather = weather[weather['DEWP'] <= 40]
+        # Conversions Météo
+        if 'TEMP' in weather.columns:
+            weather['TEMP'] = (weather['TEMP'] - 32) * 5.0/9.0
+        if 'DEWP' in weather.columns:
+            weather['DEWP'] = (weather['DEWP'] - 32) * 5.0/9.0
+        if 'WDSP' in weather.columns:
+            weather['WDSP'] = weather['WDSP'] * 1.852
+    
+        # Filtres valeurs aberrantes
+        if 'WDSP' in weather.columns:
+            weather = weather[weather['WDSP'] <= 150]
+        if 'DEWP' in weather.columns:
+            weather = weather[weather['DEWP'] <= 40]
         
-        stations = weather[['ID_STATION', 'NAME', 'LATITUDE', 'LONGITUDE']].drop_duplicates()
+        stations = pd.DataFrame()
+        if not weather.empty:
+            stations = weather[['ID_STATION', 'NAME', 'LATITUDE', 'LONGITUDE']].drop_duplicates()
+        
         return geo, air, weather, stations
 
     def haversine_vectorized(lon1, lat1, lon2, lat2):
@@ -149,7 +177,7 @@ if app_mode == "NYC Air Quality":
                 })
         return pd.DataFrame(results)
 
-    # 3. CHARGEMENT & FILTRES
+    # 2. CHARGEMENT DONNÉES
     geo, df_air, df_weather, df_stations = load_data()
 
     if geo is not None:
@@ -163,40 +191,34 @@ if app_mode == "NYC Air Quality":
         st.sidebar.markdown("---")
         st.sidebar.header("🎛️ Filtres & Paramètres")
 
-        # Dates
+        # Filtres
         min_date, max_date = df_air['DATE_OBSERVATION'].min(), df_air['DATE_OBSERVATION'].max()
         start_date, end_date = st.sidebar.date_input(
             "Période d'analyse", [min_date, max_date], min_value=min_date, max_value=max_date
         )
 
-        # Filtre Polluants
         mask_air_date = (df_air['DATE_OBSERVATION'].dt.date >= start_date) & (df_air['DATE_OBSERVATION'].dt.date <= end_date)
         df_air_filtered = df_air[mask_air_date]
 
-        valid_pollutants = df_air_filtered[df_air_filtered['VALEUR'].notna()]['NOM_POLLUANT'].unique()
-        valid_pollutants = sorted(valid_pollutants)
+        valid_pollutants = sorted(df_air_filtered[df_air_filtered['VALEUR'].notna()]['NOM_POLLUANT'].unique())
 
         if len(valid_pollutants) > 0:
-            selected_polluant = st.sidebar.selectbox("Polluant (Dispo sur la période)", valid_pollutants)
+            selected_polluant = st.sidebar.selectbox("Polluant", valid_pollutants)
         else:
-            st.sidebar.error("⚠️ Aucune donnée de pollution pour cette période.")
+            st.sidebar.error("⚠️ Aucune donnée de pollution.")
             selected_polluant = None
 
-        # Autres Filtres
-        radius = st.sidebar.slider("Rayon des stations météo (km)", 1, 100, 15)
+        radius = st.sidebar.slider("Rayon stations météo (km)", 1, 100, 15)
         meteo_vars = ['Température', 'Vitesse Vent', 'Point de Rosée']
-        selected_meteo_vars = st.sidebar.multiselect("Graphiques Météo (Comparaison & Boxplots)", meteo_vars, default=['Température'])
+        selected_meteo_vars = st.sidebar.multiselect("Graphiques Météo", meteo_vars, default=['Température'])
 
-        # 4. ETL A LA VOLÉE
         if selected_polluant is None:
-            st.warning("Veuillez élargir la plage de dates.")
             st.stop()
 
-        # Filtre Météo
         mask_weather_date = (df_weather['DATE'].dt.date >= start_date) & (df_weather['DATE'].dt.date <= end_date)
         df_weather_filtered = df_weather[mask_weather_date]
 
-        # --- INDICATEUR SIDEBAR ---
+        # Indicateurs Sidebar
         with st.sidebar:
             st.markdown("---")
             st.markdown("### ℹ️ Info Stations")
@@ -209,9 +231,7 @@ if app_mode == "NYC Air Quality":
                 if not active_stations_coords.empty:
                     dists_s = haversine_vectorized(lon_center, lat_center, active_stations_coords['LONGITUDE'].values, active_stations_coords['LATITUDE'].values)
                     nb_visible = np.sum(dists_s <= radius)
-                    st.metric(f"Stations (Centre NYC, {radius} km)", nb_visible)
-                else:
-                    st.metric(f"Stations (Centre NYC, {radius} km)", 0)
+                    st.metric(f"Stations (Global, {radius} km)", nb_visible)
             else:
                 sel_geo = geo[geo['GEOCODE'] == st.session_state.selected_geocode]
                 if not sel_geo.empty:
@@ -220,11 +240,9 @@ if app_mode == "NYC Air Quality":
                     if not active_stations_coords.empty:
                         dists_s = haversine_vectorized(lon_s, lat_s, active_stations_coords['LONGITUDE'].values, active_stations_coords['LATITUDE'].values)
                         nb_visible = np.sum(dists_s <= radius)
-                        st.metric(f"Stations (Quartier, {radius} km)", nb_visible)
-                    else:
-                        st.metric(f"Stations (Quartier, {radius} km)", 0)
+                        st.metric(f"Stations (Local, {radius} km)", nb_visible)
 
-        # --- PRÉPARATION DONNÉES CARTE ---
+        # Préparation Données Carte
         df_air_map = df_air_filtered[df_air_filtered['NOM_POLLUANT'] == selected_polluant]
         if not df_air_map.empty:
             air_agg = df_air_map.groupby('GEOJOIN_ID')['VALEUR'].mean().reset_index()
@@ -243,33 +261,27 @@ if app_mode == "NYC Air Quality":
         gdf_display['W_TEMP'] = gdf_display['W_TEMP'].fillna(0)
         gdf_display['NB_STATIONS'] = gdf_display['NB_STATIONS'].fillna(0).astype(int)
 
-        # --- PRÉPARATION DONNÉES GRAPHIQUES & KPIs ---
-        current_title = ""
-        current_caption = ""
-        avg_polluant, avg_temp, avg_wind = 0, 0, 0
-
+        # Préparation Données Graphiques
         chart_air_src = pd.DataFrame()
         chart_weather_src = pd.DataFrame()
+        
+        current_title, current_caption = "", ""
+        avg_polluant, avg_temp, avg_wind = 0, 0, 0
 
         if st.session_state.selected_geocode is None:
-            # GLOBAL
             current_title = "New York City (Global)"
             current_caption = "Moyenne de tous les quartiers"
-            
             valid_data = gdf_display[gdf_display['MEAN_POLLUANT'] > 0]
             if not valid_data.empty:
                 avg_polluant = valid_data['MEAN_POLLUANT'].mean()
                 avg_temp = valid_data['W_TEMP'].replace(0, np.nan).mean()
                 avg_wind = valid_data['W_WIND'].replace(0, np.nan).mean()
-            
             chart_air_src = df_air_filtered[df_air_filtered['NOM_POLLUANT'] == selected_polluant].copy()
             chart_weather_src = df_weather_filtered.copy()
         else:
-            # LOCAL
             current_geo_data = gdf_display[gdf_display['GEOCODE'] == st.session_state.selected_geocode].iloc[0]
             current_title = current_geo_data['GEONAME']
-            current_caption = f"Borough: {current_geo_data['BOROUGH']} | Stations locales : {int(current_geo_data['NB_STATIONS'])}"
-            
+            current_caption = f"Borough: {current_geo_data['BOROUGH']}"
             avg_polluant = current_geo_data['MEAN_POLLUANT']
             avg_temp = current_geo_data['W_TEMP']
             avg_wind = current_geo_data['W_WIND']
@@ -284,7 +296,7 @@ if app_mode == "NYC Air Quality":
             nearby_ids = df_stations[dists <= radius]['ID_STATION'].unique()
             chart_weather_src = df_weather_filtered[df_weather_filtered['ID_STATION'].isin(nearby_ids)].copy()
 
-        # RESAMPLING
+        # Resampling
         delta_days = (end_date - start_date).days
         resample_rule = 'D'
         if delta_days > 730: resample_rule = 'Q'
@@ -301,7 +313,7 @@ if app_mode == "NYC Air Quality":
         else:
             chart_weather_final = pd.DataFrame()
 
-        # 5. UI PRINCIPALE (PARTIE HAUTE)
+        # UI Principale
         col_map, col_details = st.columns([3, 2])
 
         with col_map:
@@ -321,30 +333,28 @@ if app_mode == "NYC Air Quality":
             )
             choropleth.add_to(m)
 
-            style_function = lambda x: {'fillColor': '#ffffff', 'color':'#000000', 'fillOpacity': 0.0, 'weight': 0.1}
-            tooltip_layer = folium.GeoJson(
+            folium.GeoJson(
                 gdf_display,
-                style_function=style_function,
+                style_function=lambda x: {'fillColor': '#ffffff', 'color':'#000000', 'fillOpacity': 0.0, 'weight': 0.1},
                 tooltip=folium.GeoJsonTooltip(
-                    fields=['GEONAME', 'BOROUGH', 'MEAN_POLLUANT', 'W_TEMP', 'W_WIND', 'NB_STATIONS'],
-                    aliases=['Quartier:', 'Borough:', f'{selected_polluant}:', 'Temp (°C):', 'Vent (km/h):', 'Stations:'],
+                    fields=['GEONAME', 'BOROUGH', 'MEAN_POLLUANT', 'W_TEMP'],
+                    aliases=['Quartier:', 'Borough:', f'{selected_polluant}:', 'Temp (°C):'],
                     localize=True
                 )
             ).add_to(m)
 
             st_map = st_folium(m, width=None, height=650)
             
-            # Synchro Clic
-            geo_options_df = geo[['GEOCODE', 'GEONAME']].sort_values('GEONAME')
             if st_map and st_map.get('last_object_clicked'):
                 last_clicked = st_map['last_object_clicked']
                 if isinstance(last_clicked, dict) and 'properties' in last_clicked:
                     props = last_clicked['properties']
-                    if props and 'GEOCODE' in props:
+                    if 'GEOCODE' in props:
                         clicked_code = str(props['GEOCODE'])
-                        name_match = geo_options_df[geo_options_df['GEOCODE'] == clicked_code]['GEONAME']
+                        name_match = geo[['GEOCODE', 'GEONAME']].drop_duplicates()
+                        name_match = name_match[name_match['GEOCODE'] == clicked_code]
                         if not name_match.empty:
-                            clicked_name = name_match.values[0]
+                            clicked_name = name_match.iloc[0]['GEONAME']
                             if st.session_state.dropdown_selector != clicked_name:
                                 st.session_state.dropdown_selector = clicked_name
                                 st.session_state.selected_geocode = clicked_code
@@ -352,13 +362,13 @@ if app_mode == "NYC Air Quality":
 
         with col_details:
             st.markdown("### 📍 Détails")
-            all_options = ["Tous quartiers"] + geo_options_df['GEONAME'].tolist()
+            all_options = ["Tous quartiers"] + sorted(geo['GEONAME'].unique().tolist())
             selected_option = st.selectbox("Sélectionner une zone", options=all_options, key="dropdown_selector")
             
             if selected_option == "Tous quartiers":
                 st.session_state.selected_geocode = None
             else:
-                code_match = geo_options_df[geo_options_df['GEONAME'] == selected_option]['GEOCODE']
+                code_match = geo[geo['GEONAME'] == selected_option]['GEOCODE']
                 if not code_match.empty:
                     st.session_state.selected_geocode = str(code_match.values[0])
 
@@ -366,18 +376,12 @@ if app_mode == "NYC Air Quality":
             st.caption(current_caption)
 
             kpi1, kpi2, kpi3 = st.columns(3)
-            val_p = f"{avg_polluant:.2f}" if pd.notnull(avg_polluant) else "N/A"
-            val_t = f"{avg_temp:.1f} °C" if pd.notnull(avg_temp) else "N/A"
-            val_w = f"{avg_wind:.1f} km/h" if pd.notnull(avg_wind) else "N/A"
-            
-            kpi1.metric(f"Moy. {selected_polluant}", val_p)
-            kpi2.metric("Temp. Moy", val_t)
-            kpi3.metric("Vent Moy", val_w)
+            kpi1.metric(f"Moy. {selected_polluant}", f"{avg_polluant:.2f}" if pd.notnull(avg_polluant) else "N/A")
+            kpi2.metric("Temp. Moy", f"{avg_temp:.1f} °C" if pd.notnull(avg_temp) else "N/A")
+            kpi3.metric("Vent Moy", f"{avg_wind:.1f} km/h" if pd.notnull(avg_wind) else "N/A")
 
             st.markdown("---")
-            
-            st.subheader("📈 Analyses Temporelles")
-            st.markdown(f"**Tendance : {selected_polluant}**")
+            st.subheader("📈 Tendance")
             
             fig_main = go.Figure()
             if not chart_air_final.empty:
@@ -386,23 +390,13 @@ if app_mode == "NYC Air Quality":
                     y=chart_air_final['VALEUR'], 
                     name=selected_polluant, 
                     mode='lines+markers',
-                    marker=dict(size=8),
                     line=dict(color='red', width=3)
                 ))
-                fig_main.update_layout(
-                    xaxis_title="Date", 
-                    yaxis=dict(title="Concentration"), 
-                    height=300,
-                    margin=dict(t=10, b=0, l=0, r=0)
-                )
+                fig_main.update_layout(xaxis_title="Date", yaxis_title="Concentration", height=300, margin=dict(t=10,b=0,l=0,r=0))
                 st.plotly_chart(fig_main, use_container_width=True)
-            else:
-                st.info("Pas de données suffisantes pour afficher l'évolution.")
 
-        # 6. SECTION ANALYSE MÉTÉO (BAS DE PAGE)
         st.markdown("---")
-        st.subheader("☁️ Analyse Météo")
-
+        st.subheader("☁️ Analyse Croisée Météo")
         col_graphs, col_box = st.columns([2, 1])
 
         meteo_config = {
@@ -412,116 +406,118 @@ if app_mode == "NYC Air Quality":
         }
 
         with col_graphs:
-            st.markdown("#### 📉 Corrélations")
-            if not selected_meteo_vars:
-                st.info("Sélectionnez des variables météo dans le menu.")
-            else:
-                for var_name in selected_meteo_vars:
-                    fig = go.Figure()
-                    if not chart_air_final.empty:
-                        fig.add_trace(go.Scatter(
-                            x=chart_air_final['DATE_OBSERVATION'], 
-                            y=chart_air_final['VALEUR'], 
-                            name=selected_polluant, 
-                            mode='lines',
-                            line=dict(color='red', width=1, dash='solid'),
-                            opacity=0.5
-                        ))
-                    if not chart_weather_final.empty and var_name in meteo_config:
-                        conf = meteo_config[var_name]
-                        fig.add_trace(go.Scatter(
-                            x=chart_weather_final['DATE'], 
-                            y=chart_weather_final[conf['col']], 
-                            name=conf['label'], 
-                            mode='lines+markers',
-                            marker=dict(size=4),
-                            line=dict(color=conf['color'], width=2), 
-                            yaxis='y2'
-                        ))
-
-                    fig.update_layout(
-                        title=f"{selected_polluant} vs {var_name}",
-                        xaxis_title="Date",
-                        yaxis=dict(title=selected_polluant, showgrid=False),
-                        yaxis2=dict(title=var_name, overlaying='y', side='right', showgrid=True),
-                        legend=dict(orientation="h", y=1.1),
-                        height=300, margin=dict(t=30, b=0, l=0, r=0)
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+            for var_name in selected_meteo_vars:
+                fig = go.Figure()
+                if not chart_air_final.empty:
+                    fig.add_trace(go.Scatter(
+                        x=chart_air_final['DATE_OBSERVATION'], 
+                        y=chart_air_final['VALEUR'], 
+                        name=selected_polluant, 
+                        line=dict(color='red', width=1)
+                    ))
+                if not chart_weather_final.empty and var_name in meteo_config:
+                    conf = meteo_config[var_name]
+                    fig.add_trace(go.Scatter(
+                        x=chart_weather_final['DATE'], 
+                        y=chart_weather_final[conf['col']], 
+                        name=conf['label'], 
+                        line=dict(color=conf['color'], width=2), 
+                        yaxis='y2'
+                    ))
+                fig.update_layout(
+                    title=f"{selected_polluant} vs {var_name}",
+                    yaxis=dict(title=selected_polluant),
+                    yaxis2=dict(title=var_name, overlaying='y', side='right'),
+                    height=300, margin=dict(t=30,b=0,l=0,r=0)
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
         with col_box:
-            st.markdown("#### 📦 Distributions")
             if selected_meteo_vars and not chart_weather_src.empty:
                 for var_name in selected_meteo_vars:
-                    if var_name in meteo_config:
-                        conf = meteo_config[var_name]
-                        
-                        fig_box = go.Figure()
-                        fig_box.add_trace(go.Box(
-                            y=chart_weather_src[conf['col']],
-                            name=conf['label'],
-                            marker_color=conf['color']
-                        ))
-                        
-                        fig_box.update_layout(
-                            title=f"{var_name}",
-                            yaxis_title=conf['label'],
-                            height=300,
-                            margin=dict(t=30, b=20, l=0, r=0)
-                        )
-                        st.plotly_chart(fig_box, use_container_width=True)
-            else:
-                st.write("Pas de données pour les distributions.")
+                    conf = meteo_config[var_name]
+                    fig_box = go.Figure(go.Box(y=chart_weather_src[conf['col']], name=conf['label'], marker_color=conf['color']))
+                    fig_box.update_layout(title=f"Dist. {var_name}", height=300, margin=dict(t=30,b=20,l=0,r=0))
+                    st.plotly_chart(fig_box, use_container_width=True)
 
-# ==========================================
+# ==============================================================================
 # APP 2 : RTE (DATALAKE INCREMENTAL)
-# ==========================================
+# ==============================================================================
 elif app_mode == "RTE Production":
     st.title("⚡ Mix Électrique France")
 
-    # CONTROLES
-    if st.sidebar.button("Forcer Mise à jour (Requis pour échanges)"):
-        with st.spinner("Téléchargement des données (Toutes colonnes)..."):
-            df, msg = rte_layer.update_datalake()
-            st.session_state['rte_data'] = df
-            if "✅" in msg: st.sidebar.success(msg)
-            else: st.sidebar.error(msg)
+    if st.sidebar.button("🔄 Forcer Mise à jour (RTE)"):
+        status_text = st.sidebar.empty()
+        status_text.info("⏳ Téléchargement RTE en cours...")
+        
+        # 1. Récupération des données (RAM) via module local
+        df_new, msg = rte_layer.get_latest_data()
+        
+        if df_new.empty:
+            status_text.error(f"❌ Erreur DL : {msg}")
+        else:
+            # --- CORRECTION ICI ---
+            # On met à jour le cache de l'app pour que le graphique change TOUT DE SUITE
+            st.session_state['rte_data'] = df_new
+            
+            status_text.info(f"💾 Sauvegarde HDFS ({len(df_new)} lignes)...")
+            try:
+                # 2. Écriture HDFS via Spark
+                spark = get_spark_session()
+                
+                # On prépare une copie pour Spark (qui n'aime pas les index Datetime)
+                # On ne touche pas à df_new qui sert à l'affichage
+                df_spark_ready = df_new.copy()
+                if isinstance(df_spark_ready.index, pd.DatetimeIndex):
+                    df_spark_ready = df_spark_ready.reset_index()
+                    
+                spark_df = spark.createDataFrame(df_spark_ready)
+                
+                hdfs_rte_path = "/user/mathis/datalake/raw/rte/rte_datalake.parquet"
+                spark_df.write.mode("overwrite").parquet(hdfs_rte_path)
+                
+                status_text.success("✅ Succès ! Données à jour.")
+                time.sleep(1)
+                st.rerun()
+                
+            except Exception as e:
+                status_text.error(f"❌ Erreur Écriture HDFS : {e}")
 
-    # CHARGEMENT
+    # CHARGEMENT LECTURE
     if 'rte_data' not in st.session_state:
-        st.session_state['rte_data'] = rte_layer.get_data()
+        # On peut aussi lire HDFS ici si souhaité, 
+        # mais on garde votre logique 'rte_layer.get_data()' si elle lit en local ou HDFS.
+        # Pour être cohérent Big Data, on pourrait lire HDFS ici aussi :
+        try:
+            spark = get_spark_session()
+            path = "/user/mathis/datalake/raw/rte/rte_datalake.parquet"
+            # Lecture Lazy Spark -> Pandas
+            df_rte_spark = spark.read.parquet(path).toPandas()
+            if 'Datetime' in df_rte_spark.columns:
+                df_rte_spark['Datetime'] = pd.to_datetime(df_rte_spark['Datetime'])
+                df_rte_spark = df_rte_spark.set_index('Datetime').sort_index()
+            st.session_state['rte_data'] = df_rte_spark
+        except:
+            # Fallback si HDFS vide
+            st.session_state['rte_data'] = pd.DataFrame()
 
-    # --- AFFICHAGE OU DIAGNOSTIC ---
     data = st.session_state.get('rte_data', pd.DataFrame())
 
     if not data.empty:
-        # 0. AUTO-TRUNCATE
+        # Auto-Truncate
         if 'Consommation' in data.columns:
             valid_idx = data[data['Consommation'] > 1].index
             if not valid_idx.empty:
-                last_valid_dt = valid_idx.max()
-                data = data.loc[:last_valid_dt]
+                data = data.loc[:valid_idx.max()]
 
-        # 1. FILTRES TEMPORELS
         st.sidebar.markdown("---")
         st.sidebar.header("📅 Filtrage Temporel")
         
-        min_ts = data.index.min()
-        max_ts = data.index.max()
-        
-        if pd.isnull(min_ts) or pd.isnull(max_ts):
-             st.warning("Données temporelles invalides.")
-             st.stop()
-
+        min_ts, max_ts = data.index.min(), data.index.max()
         default_start = max_ts.date() - pd.Timedelta(days=7)
         if default_start < min_ts.date(): default_start = min_ts.date()
 
-        date_range = st.sidebar.date_input(
-            "Période",
-            value=(default_start, max_ts.date()),
-            min_value=min_ts.date(),
-            max_value=max_ts.date()
-        )
+        date_range = st.sidebar.date_input("Période", value=(default_start, max_ts.date()), min_value=min_ts.date(), max_value=max_ts.date())
         
         data_filtered = data.copy()
         if len(date_range) == 2:
@@ -530,155 +526,65 @@ elif app_mode == "RTE Production":
             data_filtered = data_filtered[mask]
         
         if data_filtered.empty:
-            st.warning(f"Aucune donnée sur la période : {date_range}")
+            st.warning("Aucune donnée sur la période.")
         else:
-            # 2. KPIs
             last_row = data_filtered.iloc[-1]
-            last_time_str = last_row.name.strftime('%d/%m/%Y %H:%M')
-            
             prod_cols = [c for c in data.columns if c in RTE_COLORS and c != 'Consommation']
             total_prod = last_row[prod_cols].sum()
             
-            st.markdown(f"### Situation au {last_time_str}")
+            st.markdown(f"### Situation au {last_row.name.strftime('%d/%m/%Y %H:%M')}")
             
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Production", f"{total_prod:,.0f} MW")
             c2.metric("Consommation", f"{last_row.get('Consommation',0):,.0f} MW")
-            balance = total_prod - last_row.get('Consommation',0)
-            c3.metric("Solde (Indicatif)", f"{balance:+,.0f} MW", delta_color="normal")
+            c3.metric("Solde", f"{(total_prod - last_row.get('Consommation',0)):+,.0f} MW")
             c4.metric("Nucléaire", f"{last_row.get('Nucléaire',0):,.0f} MW")
 
-            # 3. GRAPHIQUE (AIRE EMPILÉE)
-            st.subheader("Évolution du Mix Électrique")
-            cols_to_plot = [c for c in prod_cols if data_filtered[c].sum() > 0]
-            
-            fig = px.area(
-                data_filtered, 
-                x=data_filtered.index, 
-                y=cols_to_plot, 
-                color_discrete_map=RTE_COLORS
-            )
-            
+            st.subheader("Évolution Mix")
+            fig = px.area(data_filtered, x=data_filtered.index, y=prod_cols, color_discrete_map=RTE_COLORS)
             if 'Consommation' in data_filtered.columns:
-                fig.add_trace(go.Scatter(
-                    x=data_filtered.index, 
-                    y=data_filtered['Consommation'], 
-                    mode='lines', 
-                    name='Consommation', 
-                    line=dict(color='black', width=3)
-                ))
-            
-            fig.update_layout(
-                margin=dict(l=0, r=0, t=10, b=0), 
-                height=450,
-                legend=dict(orientation="h", y=1.02, x=0)
-            )
+                fig.add_trace(go.Scatter(x=data_filtered.index, y=data_filtered['Consommation'], mode='lines', name='Consommation', line=dict(color='black')))
             st.plotly_chart(fig, use_container_width=True)
 
-            # 4. DONUT & DÉTAILS
             st.markdown("---")
             col_pie, col_table = st.columns([1, 2])
             
-            pie_data = last_row[cols_to_plot]
-            pie_data = pie_data[pie_data > 0].sort_values(ascending=False)
-
             with col_pie:
-                st.markdown("#### Mix (Instant T)")
-                fig_pie = go.Figure(data=[go.Pie(
-                    labels=pie_data.index, 
-                    values=pie_data.values, 
-                    hole=.4, 
-                    textinfo='label+percent',
-                    marker=dict(colors=[RTE_COLORS.get(x, '#333') for x in pie_data.index])
-                )])
-                fig_pie.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=300, showlegend=False)
+                pie_data = last_row[prod_cols]
+                pie_data = pie_data[pie_data > 0]
+                fig_pie = go.Figure(go.Pie(labels=pie_data.index, values=pie_data.values, hole=.4, marker=dict(colors=[RTE_COLORS.get(x) for x in pie_data.index])))
+                fig_pie.update_layout(height=300, margin=dict(t=0,b=0,l=0,r=0))
                 st.plotly_chart(fig_pie, use_container_width=True)
 
             with col_table:
-                st.markdown("#### Données Brutes (Dernières 24h)")
-                st.dataframe(
-                    data_filtered.tail(24).sort_index(ascending=False), 
-                    use_container_width=True,
-                    height=300
-                )
+                st.dataframe(data_filtered.tail(24).sort_index(ascending=False), use_container_width=True, height=300)
 
-            # ------------------------------------------------------------------
-            # 5. CARTE DES ÉCHANGES (NOUVELLE SECTION)
-            # ------------------------------------------------------------------
+            # CARTE ECHANGES
             st.markdown("---")
-            st.subheader("🌍 Carte des Échanges Frontaliers")
-
-            # Identification dynamique des colonnes d'échange
-            exch_cols = [c for c in last_row.index if "Ech." in c and ("comm." in c or "Pays" in c or len(c) > 5)]
-            exch_cols = [c for c in exch_cols if "physique" not in c.lower()]
-
+            st.subheader("🌍 Carte des Échanges")
+            exch_cols = [c for c in last_row.index if "Ech." in c and ("comm." in c or "Pays" in c or len(c) > 5) and "physique" not in c.lower()]
+            
             if exch_cols:
-                # Création de la carte centrée sur la France
                 m_exch = folium.Map(location=[46.6, 2.2], zoom_start=5, tiles="CartoDB positron")
+                folium.Marker(COUNTRY_COORDS['France'], icon=folium.Icon(color='blue', icon='home')).add_to(m_exch)
                 
-                # Ajout du marqueur "France" (Centre)
-                folium.Marker(
-                    COUNTRY_COORDS['France'],
-                    popup="France (Centre)",
-                    icon=folium.Icon(color='blue', icon='home')
-                ).add_to(m_exch)
-
                 found_any = False
                 for c in exch_cols:
                     val = last_row[c]
-                    # Nettoyage du nom pour matcher les clés de COUNTRY_COORDS
-                    # Ex: "Ech. comm. Angleterre" -> "Angleterre"
                     country_key = c.replace("Ech. comm. ", "").replace("Ech. comm.", "").strip()
-                    
                     if country_key in COUNTRY_COORDS:
                         found_any = True
-                        coord_neighbor = COUNTRY_COORDS[country_key]
-                        coord_france = COUNTRY_COORDS['France']
+                        coord_n = COUNTRY_COORDS[country_key]
+                        coord_f = COUNTRY_COORDS['France']
                         
-                        # RTE : Positif = Import (Solde Importateur) -> Vers la France
-                        # RTE : Négatif = Export (Solde Exportateur) -> Vers le Voisin
-                        
-                        if val > 0: # IMPORT (Vert, Flèche vers France)
-                            color = 'green'
-                            direction_str = f"📥 Import de {country_key}"
-                            # Ligne
-                            folium.PolyLine([coord_neighbor, coord_france], color=color, weight=3, opacity=0.8).add_to(m_exch)
-                            # Marqueur sur le voisin avec flèche "Sortante" de chez lui (ou entrante chez nous ?)
-                            # Pour être clair : Flèche "Down" = In (Import)
-                            folium.Marker(
-                                coord_neighbor,
-                                icon=folium.Icon(color=color, icon='arrow-down'),
-                                tooltip=f"{direction_str}: {val:,.0f} MW"
-                            ).add_to(m_exch)
-                            
-                        elif val < 0: # EXPORT (Rouge, Flèche vers Voisin)
-                            color = 'red'
-                            direction_str = f"📤 Export vers {country_key}"
-                            # Ligne
-                            folium.PolyLine([coord_france, coord_neighbor], color=color, weight=3, opacity=0.8).add_to(m_exch)
-                            # Marqueur sur le voisin avec flèche "Up" = Out (Export)
-                            folium.Marker(
-                                coord_neighbor,
-                                icon=folium.Icon(color=color, icon='arrow-up'),
-                                tooltip=f"{direction_str}: {abs(val):,.0f} MW"
-                            ).add_to(m_exch)
-                        else:
-                            # Echange nul
-                            folium.Marker(
-                                coord_neighbor,
-                                icon=folium.Icon(color='gray', icon='minus'),
-                                tooltip=f"Echange nul avec {country_key}"
-                            ).add_to(m_exch)
-
+                        if val > 0: # Import
+                            folium.PolyLine([coord_n, coord_f], color='green', weight=3).add_to(m_exch)
+                            folium.Marker(coord_n, icon=folium.Icon(color='green', icon='arrow-down'), tooltip=f"Import: {val:,.0f} MW").add_to(m_exch)
+                        elif val < 0: # Export
+                            folium.PolyLine([coord_f, coord_n], color='red', weight=3).add_to(m_exch)
+                            folium.Marker(coord_n, icon=folium.Icon(color='red', icon='arrow-up'), tooltip=f"Export: {abs(val):,.0f} MW").add_to(m_exch)
+                
                 if found_any:
                     st_folium(m_exch, width=None, height=500)
-                    st.caption("🟢 Vert/Flèche Bas = Import (Nous achetons) | 🔴 Rouge/Flèche Haut = Export (Nous vendons)")
-                else:
-                    st.warning("Pays voisins non reconnus dans les données.")
-            else:
-                st.error("⚠️ Les données d'échanges ('Ech. comm.') sont introuvables.")
-                st.info("💡 Cliquez sur 'Forcer Mise à jour' pour recharger les données complètes.")
-
     else:
-        st.error("⚠️ Données RTE indisponibles.")
-        st.info("Utilisez le bouton 'Forcer Mise à jour' pour initialiser le Datalake.")
+        st.warning("Données indisponibles. Lancez la mise à jour.")
