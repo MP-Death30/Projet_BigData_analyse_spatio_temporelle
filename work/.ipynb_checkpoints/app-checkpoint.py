@@ -558,7 +558,33 @@ elif app_mode == "RTE Production":
                 k2.metric("Consommation", f"{current_conso/1000:.1f} GW")
                 k3.metric("Nucléaire", f"{last_row.get('Nucléaire', 0)/1000:.1f} GW", 
                           f"{last_row.get('Nucléaire', 0)/current_prod*100:.0f}% du mix")
-                k4.metric("Co2 (Estimé)", f"{last_row.get('Taux de CO2', 'N/A')} g/kWh")
+                
+                # --- REMPLACEMENT ICI : CO2 -> MIX ÉNERGÉTIQUE ---
+                with k4:
+                    # Titre style "Metric"
+                    st.markdown("<p style='font-size: 14px; margin-bottom: 5px;'>Mix Énergétique</p>", unsafe_allow_html=True)
+                    
+                    # Création du Donut (Version Compacte)
+                    pie_data = last_row[prod_cols]
+                    pie_data = pie_data[pie_data > 0] # On garde que ce qui produit
+                    
+                    fig_kpi_pie = go.Figure(go.Pie(
+                        labels=pie_data.index, 
+                        values=pie_data.values, 
+                        hole=.6, # Trou plus grand pour aspect "anneau fin"
+                        marker=dict(colors=[RTE_COLORS.get(x, '#333') for x in pie_data.index]),
+                        textinfo='none', # Pas de texte pour rester propre en petit
+                        hoverinfo='label+percent+value'
+                    ))
+                    
+                    fig_kpi_pie.update_layout(
+                        height=80, # Très petite hauteur pour s'aligner avec les chiffres
+                        margin=dict(t=0, b=0, l=0, r=0),
+                        showlegend=False,
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)'
+                    )
+                    st.plotly_chart(fig_kpi_pie, use_container_width=True)
 
             # --- GRAPHIQUE 1 : PRODUCTION PAR FILIERE (AIRE) ---
             st.subheader(f"Production d'électricité par filière ({date_selected.strftime('%d/%m/%Y')})")
@@ -601,13 +627,20 @@ elif app_mode == "RTE Production":
             st.markdown("---")
             c_map, c_gauge = st.columns([2, 1])
 
+            # --- SECTION 2 : CARTE ET JAUGE (COTE A COTE) ---
+            st.markdown("---")
+            
+            # MODIFICATION ICI : Ratio [1, 1] pour donner plus de place aux jauges
+            c_map, c_gauge = st.columns([1, 1])
+
             with c_map:
                 st.subheader("🌍 Échanges aux frontières")
                 
-                # Carte Folium
-                m = folium.Map(location=[46.6, 2.2], zoom_start=5, tiles="CartoDB positron")
+                # Carte focalisée "Carré France"
+                # Zoom 6 + Centrage ajusté pour voir les voisins (UK, ES, IT, DE, CH)
+                m = folium.Map(location=[46.5, 2.5], zoom_start=5.25, tiles="CartoDB positron")
                 
-                # Marqueurs Fixes
+                # Marqueur France
                 folium.Marker(COUNTRY_COORDS['France'], popup="France", 
                              icon=folium.Icon(color='blue', icon='home', prefix='fa')).add_to(m)
 
@@ -615,7 +648,6 @@ elif app_mode == "RTE Production":
                 if exch_cols:
                     for c in exch_cols:
                         val = last_row[c]
-                        # Extraction nom pays (ex: "Ech. comm. Angleterre" -> "Angleterre")
                         country = c.replace("Ech. comm. ", "").replace("Ech. comm.", "").strip()
                         
                         if country in COUNTRY_COORDS:
@@ -623,32 +655,27 @@ elif app_mode == "RTE Production":
                             coord = COUNTRY_COORDS[country]
                             coord_fr = COUNTRY_COORDS['France']
                             
-                            # Logique Visuelle RTE :
-                            # Import (>0) : Vert, Flèche vers la France
-                            # Export (<0) : Rouge, Flèche vers le Pays
-                            
-                            if val > 0: # IMPORT
+                            # Logique Visuelle (Rouge=Export, Vert=Import)
+                            if val > 0: # IMPORT (Vers la France)
                                 color = 'green'
-                                icon_name = 'arrow-down' # Vers le bas/centre
+                                icon_name = 'arrow-down'
                                 tooltip = f"IMPORT depuis {country}: {val:,.0f} MW"
-                                # Ligne pointillée verte
-                                folium.PolyLine([coord, coord_fr], color=color, weight=3, dash_array='10').add_to(m)
-                                
-                            else: # EXPORT
+                                folium.PolyLine([coord, coord_fr], color=color, weight=4, opacity=0.8, dash_array='10').add_to(m)
+                            else: # EXPORT (Depuis la France)
                                 color = 'red'
-                                icon_name = 'arrow-up' # Vers le haut/extérieur
+                                icon_name = 'arrow-up'
                                 tooltip = f"EXPORT vers {country}: {abs(val):,.0f} MW"
-                                # Ligne continue rouge
-                                folium.PolyLine([coord_fr, coord], color=color, weight=3).add_to(m)
+                                folium.PolyLine([coord_fr, coord], color=color, weight=4, opacity=0.8).add_to(m)
                             
-                            # Marqueur sur le pays voisin
+                            # Marqueur Voisin
                             folium.Marker(
                                 location=coord,
                                 icon=folium.Icon(color=color, icon=icon_name, prefix='fa'),
                                 tooltip=tooltip
                             ).add_to(m)
                 
-                st_folium(m, width=None, height=450)
+                # Hauteur ajustée pour un rendu "Carré" (approx 500px sur écran standard)
+                st_folium(m, width=None, height=500)
                 
                 if not found_exchange:
                     st.info("⚠️ Pas de données d'échanges frontaliers disponibles.")
@@ -656,74 +683,110 @@ elif app_mode == "RTE Production":
             with c_gauge:
                 st.subheader("⚖️ Solde Import/Export")
                 
-                # 1. Calculs
+                # =========================================================
+                # 1. JAUGE PRINCIPALE (GLOBALE) - INCHANGÉE
+                # =========================================================
+                
                 net_balance = last_row[exch_cols].sum() if exch_cols else 0
                 limit = 15000
                 
-                # 2. Définition Titre & Couleur
+                # Couleurs
+                color_export = "#D32F2F" # Rouge
+                color_import = "#388E3C" # Vert
+                
+                # Logique Remplissage (Step)
                 if net_balance < 0:
                     title_gauge = "Exportateur Net"
-                    color_bar = "#D32F2F" # Rouge
-                    # On crée une marche qui va de la valeur à 0 (car valeur négative)
-                    active_step = {'range': [net_balance, 0], 'color': color_bar}
+                    active_step = {'range': [net_balance, 0], 'color': color_export}
                 else:
                     title_gauge = "Importateur Net"
-                    color_bar = "#388E3C" # Vert
-                    # On crée une marche qui va de 0 à la valeur
-                    active_step = {'range': [0, net_balance], 'color': color_bar}
+                    active_step = {'range': [0, net_balance], 'color': color_import}
                 
-                # 3. Construction de la Jauge
                 fig_gauge = go.Figure(go.Indicator(
                     mode = "gauge+number+delta",
                     value = net_balance,
                     domain = {'x': [0, 1], 'y': [0, 1]},
                     title = {'text': f"{title_gauge}<br><span style='font-size:0.8em;color:gray'>Flux (MW)</span>"},
-                    delta = {'reference': 0, 'increasing': {'color': "#388E3C"}, 'decreasing': {'color': "#D32F2F"}},
+                    delta = {'reference': 0, 'increasing': {'color': color_import}, 'decreasing': {'color': color_export}},
                     gauge = {
                         'axis': {'range': [-limit, limit], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                        
-                        # ASTUCE : On rend la barre officielle transparente pour la cacher
-                        'bar': {'color': "rgba(0,0,0,0)"},
-                        
+                        'bar': {'color': "rgba(0,0,0,0)"}, # Invisible
                         'bgcolor': "white",
                         'borderwidth': 2,
                         'bordercolor': "gray",
-                        
-                        # On définit les zones de fond + la zone active
                         'steps': [
-                            # Fonds clairs (inchangés)
-                            {'range': [-limit, 0], 'color': "rgba(211, 47, 47, 0.15)"},  
+                            {'range': [-limit, 0], 'color': "rgba(211, 47, 47, 0.15)"},
                             {'range': [0, limit], 'color': "rgba(56, 142, 60, 0.15)"},
-                            
-                            # La "Barre" active (qui est en fait une marche superposée)
-                            active_step
+                            active_step # La zone colorée
                         ],
-                        
-                        'threshold': {
-                            'line': {'color': "black", 'width': 4},
-                            'thickness': 0.75,
-                            'value': 0 
-                        }
+                        'threshold': {'line': {'color': "black", 'width': 4}, 'thickness': 0.75, 'value': 0}
                     }
                 ))
-
-                fig_gauge.update_layout(height=300, margin=dict(l=20, r=20, t=50, b=20))
+                fig_gauge.update_layout(height=250, margin=dict(l=20, r=20, t=50, b=0))
                 st.plotly_chart(fig_gauge, use_container_width=True)
                 
-                # --- DONUT MIX (Inchangé) ---
-                st.markdown("##### Mix Instantané")
-                pie_data = last_row[prod_cols]
-                pie_data = pie_data[pie_data > 0]
+                # =========================================================
+                # 2. LES 5 PETITS DEMI-CERCLES (FRONTIÈRES)
+                # =========================================================
+                st.markdown("---")
                 
-                fig_pie = go.Figure(go.Pie(
-                    labels=pie_data.index, 
-                    values=pie_data.values, 
-                    hole=.5,
-                    marker=dict(colors=[RTE_COLORS.get(x, '#333') for x in pie_data.index]),
-                    textinfo='percent'
-                ))
-                fig_pie.update_layout(height=200, margin=dict(t=0, b=0, l=0, r=0), showlegend=False)
-                st.plotly_chart(fig_pie, use_container_width=True)
+                # Définition des 5 pays avec leurs limites de capacité (pour que la jauge soit jolie)
+                neighbors = [
+                    {'code': 'UK', 'col': 'Ech. comm. Angleterre', 'lim': 3000},
+                    {'code': 'ES', 'col': 'Ech. comm. Espagne', 'lim': 4000},
+                    {'code': 'IT', 'col': 'Ech. comm. Italie', 'lim': 4000},
+                    {'code': 'CH', 'col': 'Ech. comm. Suisse', 'lim': 4000},
+                    {'code': 'DE/BE', 'col': 'Ech. comm. Allemagne-Belgique', 'lim': 8000}
+                ]
+                
+                # Création des 5 colonnes alignées
+                cols_mini = st.columns(5)
+                
+                for i, n in enumerate(neighbors):
+                    with cols_mini[i]:
+                        # Récupération valeur
+                        val = last_row.get(n['col'], 0)
+                        lim = n['lim']
+                        
+                        # Définition de la "marche" colorée (Step) qui part de 0
+                        if val < 0:
+                            # Export (Gauche / Rouge)
+                            mini_step = {'range': [val, 0], 'color': color_export}
+                        else:
+                            # Import (Droite / Vert)
+                            mini_step = {'range': [0, val], 'color': color_import}
+                            
+                        # Création de la Jauge minimaliste
+                        fig_mini = go.Figure(go.Indicator(
+                            mode = "gauge", # Pas de chiffre, pas de delta
+                            value = val,
+                            domain = {'x': [0, 1], 'y': [0, 1]},
+                            title = {'text': n['code'], 'font': {'size': 14, 'weight': 'bold', 'color': '#555'}},
+                            gauge = {
+                                # On cache l'axe (chiffres) mais on garde la forme
+                                'axis': {'range': [-lim, lim], 'visible': False}, 
+                                'bar': {'color': "rgba(0,0,0,0)"}, # Barre invisible
+                                'bgcolor': "white",
+                                'borderwidth': 0,
+                                'steps': [
+                                    # Fonds pâles pour dessiner le demi-cercle vide
+                                    {'range': [-lim, 0], 'color': "rgba(211, 47, 47, 0.1)"},
+                                    {'range': [0, lim], 'color': "rgba(56, 142, 60, 0.1)"},
+                                    # La couleur active
+                                    mini_step
+                                ],
+                                # Petit trait noir au milieu (0)
+                                'threshold': {'line': {'color': "black", 'width': 2}, 'thickness': 1, 'value': 0}
+                            }
+                        ))
+                        
+                        fig_mini.update_layout(
+                            height=80, # Très compact
+                            margin=dict(l=2, r=2, t=30, b=0), # Marges minimales
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            plot_bgcolor='rgba(0,0,0,0)'
+                        )
+                        st.plotly_chart(fig_mini, use_container_width=True)
 
     else:
         st.info("👋 Bienvenue ! Cliquez sur le bouton 'Actualiser depuis RTE' dans la barre latérale pour charger les données.")
