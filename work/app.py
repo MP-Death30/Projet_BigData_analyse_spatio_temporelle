@@ -11,6 +11,7 @@ import os
 import signal
 import time
 import rte_layer
+import rte_layer_regional
 
 # ==========================================
 # CONFIGURATION & STYLES
@@ -32,16 +33,16 @@ def get_spark_session():
 # --- PALETTE OFFICIELLE RTE (Approximative) ---
 # Couleurs extraites du site éCO2mix pour un rendu fidèle
 RTE_COLORS = {
-    'Nucléaire': '#F5D300',      # Jaune RTE
-    'Hydraulique': '#2774B8',    # Bleu RTE
-    'Eolien': '#84C66B',         # Vert clair
-    'Solaire': '#F29400',        # Orange
-    'Gaz': '#F05A28',            # Rouge orangé
-    'Bioénergies': '#166A57',    # Vert foncé
-    'Charbon': '#A0A0A0',        # Gris
-    'Fioul': '#805B50',          # Marron
-    'Pompage': '#113366',        # Bleu nuit
-    'Consommation': '#333333'    # Noir
+    'Nucléaire': '#FFA500',      # Orange
+    'Hydraulique': '#00CED1',    # Turquoise foncé
+    'Eolien': '#00FF00',         # Vert néon
+    'Solaire': "#EC0909",        # Jaune vif
+    'Gaz': '#FF1493',            # Rose foncé
+    'Bioénergies': '#9370DB',    # Violet moyen
+    'Charbon': '#708090',        # Gris ardoise
+    'Fioul': "#1B19C1",          # Bleu roi
+    'Pompage': '#1E90FF',        # Bleu Dodger
+    'Consommation': '#FFFFFFF'    # Blanc
 }
 
 # Ordre d'empilement logique (Base -> Pointe)
@@ -455,7 +456,9 @@ elif app_mode == "RTE Production":
     # --- CONTROLES SIDEBAR ---
     st.sidebar.markdown("---")
     st.sidebar.header("Mise à jour des données")
-    if st.sidebar.button("🔄 Actualiser depuis RTE"):
+    
+    # Bouton données nationales (existant)
+    if st.sidebar.button("🔄 Actualiser depuis RTE (National)"):
         status = st.sidebar.empty()
         status.info("⏳ Connexion API RTE...")
         
@@ -487,22 +490,118 @@ elif app_mode == "RTE Production":
                 st.rerun()
             except Exception as e:
                 status.error(f"⚠️ Erreur HDFS (mais affichage OK) : {e}")
+    
+    # Bouton données régionales (nouveau)
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🗺️ Charger Données Régionales"):
+        status = st.sidebar.empty()
+        status.info("⏳ Chargement données régionales RTE...")
+        
+        # Télécharger données régionales depuis API
+        df_regional, msg = rte_layer_regional.get_latest_regional_data()
+        
+        if df_regional.empty:
+            status.error(f"❌ Erreur régionale : {msg}")
+        else:
+            # Stockage immédiat en Session State (pour usage instantané)
+            st.session_state['rte_regional_data'] = df_regional
+            st.session_state['regional_mode'] = True
+            
+            # 💾 SAUVEGARDE HDFS (pour persistance)
+            status.info(f"💾 Sauvegarde HDFS des données régionales...")
+            
+            try:
+                spark = get_spark_session()
+                
+                # Préparer le DataFrame pour Spark (reset index)
+                df_spark_ready = df_regional.copy()
+                if isinstance(df_spark_ready.index, pd.DatetimeIndex):
+                    df_spark_ready = df_spark_ready.reset_index()
+                
+                # Écriture dans HDFS
+                spark_df = spark.createDataFrame(df_spark_ready)
+                hdfs_path = "/user/mathis/datalake/raw/rte/rte_regional.parquet"
+                spark_df.write.mode("overwrite").parquet(hdfs_path)
+                
+                status.success(f"✅ {len(df_regional)} enregistrements régionaux chargés et sauvegardés dans HDFS !")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                # Si HDFS échoue, on continue quand même avec les données en mémoire
+                status.warning(f"⚠️ Erreur HDFS (données disponibles en mémoire) : {e}")
+                time.sleep(2)
+                st.rerun()
+    
+    # Sélecteur de région (si données régionales disponibles)
+    if 'rte_regional_data' in st.session_state and not st.session_state.get('rte_regional_data', pd.DataFrame()).empty:
+        st.sidebar.markdown("---")
+        st.sidebar.header("🗺️ Filtrage Régional")
+        
+        df_regional = st.session_state['rte_regional_data']
+        available_regions = rte_layer_regional.get_available_regions(df_regional)
+        
+        selected_region = st.sidebar.selectbox(
+            "Sélectionner une région",
+            options=["France entière (National)"] + available_regions,
+            index=0
+        )
+        
+        # Bouton pour revenir aux données nationales
+        if st.sidebar.button("⬅️ Revenir aux données nationales"):
+            st.session_state['regional_mode'] = False
+            st.rerun()
+    else:
+        selected_region = None
 
     # --- CHARGEMENT DES DONNEES ---
-    if 'rte_data' not in st.session_state:
-        # Essai de lecture HDFS au démarrage, sinon vide
+    # Décider quelle source utiliser
+    
+    # 💾 CHARGEMENT AUTOMATIQUE DES DONNÉES RÉGIONALES DEPUIS HDFS
+    if 'rte_regional_data' not in st.session_state:
+        # Essai de lecture HDFS au démarrage (comme pour les données nationales)
         try:
             spark = get_spark_session()
-            path = "/user/mathis/datalake/raw/rte/rte_datalake.parquet"
+            path = "/user/mathis/datalake/raw/rte/rte_regional.parquet"
             df_spark = spark.read.parquet(path).toPandas()
+            
             if not df_spark.empty and 'Datetime' in df_spark.columns:
                 df_spark['Datetime'] = pd.to_datetime(df_spark['Datetime'])
                 df_spark = df_spark.set_index('Datetime').sort_index()
-            st.session_state['rte_data'] = df_spark
+                st.session_state['rte_regional_data'] = df_spark
+                
+                # Indicateur discret dans la sidebar
+                st.sidebar.success(f"✅ Données régionales chargées depuis HDFS ({len(df_spark)} enregistrements)")
         except:
-            st.session_state['rte_data'] = pd.DataFrame()
+            # Fichier pas encore créé ou erreur
+            st.session_state['rte_regional_data'] = pd.DataFrame()
+    
+    if 'regional_mode' in st.session_state and st.session_state['regional_mode'] and selected_region:
+        # Mode régional
+        if selected_region == "France entière (National)":
+            # Agréger toutes les régions
+            data = rte_layer_regional.filter_by_region(st.session_state['rte_regional_data'], "France entière")
+        else:
+            # Filtrer par région spécifique
+            data = rte_layer_regional.filter_by_region(st.session_state['rte_regional_data'], selected_region)
+        
+        # Indicateur visuel du mode
+        st.sidebar.info(f"📍 Mode régional actif : **{selected_region}**")
+    else:
+        # Mode national (par défaut)
+        if 'rte_data' not in st.session_state:
+            # Essai de lecture HDFS au démarrage, sinon vide
+            try:
+                spark = get_spark_session()
+                path = "/user/mathis/datalake/raw/rte/rte_datalake.parquet"
+                df_spark = spark.read.parquet(path).toPandas()
+                if not df_spark.empty and 'Datetime' in df_spark.columns:
+                    df_spark['Datetime'] = pd.to_datetime(df_spark['Datetime'])
+                    df_spark = df_spark.set_index('Datetime').sort_index()
+                st.session_state['rte_data'] = df_spark
+            except:
+                st.session_state['rte_data'] = pd.DataFrame()
 
-    data = st.session_state['rte_data']
+        data = st.session_state['rte_data']
 
     # --- AFFICHAGE PRINCIPAL ---
     if not data.empty:
@@ -608,7 +707,7 @@ elif app_mode == "RTE Production":
                     x=df_day.index, y=df_day['Consommation'],
                     mode='lines',
                     name='Consommation',
-                    line=dict(color='black', width=2)
+                    line=dict(color='white', width=2)
                 ))
 
             fig.update_layout(
@@ -633,6 +732,19 @@ elif app_mode == "RTE Production":
             with c_map:
                 st.subheader("🌍 Échanges aux frontières")
                 
+                # ⚠️ IMPORTANT : Les échanges frontaliers utilisent TOUJOURS les données NATIONALES
+                # (indépendamment de la région sélectionnée, car ce sont des échanges internationaux)
+                if 'rte_data' in st.session_state and not st.session_state['rte_data'].empty:
+                    data_for_exchanges = st.session_state['rte_data']
+                    last_row_national = data_for_exchanges.iloc[-1] if not data_for_exchanges.empty else last_row
+                    
+                    # Colonnes d'échange (données nationales)
+                    exch_cols_national = [c for c in last_row_national.index if "Ech." in c and ("comm." in c or "Pays" in c) and "physique" not in c.lower()]
+                else:
+                    data_for_exchanges = data
+                    last_row_national = last_row
+                    exch_cols_national = exch_cols
+                
                 # Sélecteur de période pour la carte
                 period_options = {
                     "Dernière valeur (instantané)": 0,
@@ -650,21 +762,21 @@ elif app_mode == "RTE Production":
                 
                 period_points = period_options[selected_period]
                 
-                # Calcul des valeurs d'échange selon la période
+                # Calcul des valeurs d'échange selon la période (TOUJOURS avec données nationales)
                 if period_points == 0:
                     # Dernière valeur uniquement
-                    exchange_values = {c: last_row[c] for c in exch_cols if c in last_row.index}
-                    subtitle = "Instantané (dernier point)"
+                    exchange_values = {c: last_row_national[c] for c in exch_cols_national if c in last_row_national.index}
+                    subtitle = "Instantané (dernier point) - Données nationales"
                 elif period_points == -1:
-                    # Toute la période (utiliser 'data' au lieu de 'data_filtered')
-                    exchange_values = {c: data[c].mean() for c in exch_cols if c in data.columns}
-                    subtitle = f"Moyenne sur {len(data)} points"
+                    # Toute la période
+                    exchange_values = {c: data_for_exchanges[c].mean() for c in exch_cols_national if c in data_for_exchanges.columns}
+                    subtitle = f"Moyenne sur {len(data_for_exchanges)} points - Données nationales"
                 else:
-                    # Derniers N points (utiliser 'data' au lieu de 'data_filtered')
-                    recent_data = data.tail(period_points)
-                    exchange_values = {c: recent_data[c].mean() for c in exch_cols if c in recent_data.columns}
+                    # Derniers N points
+                    recent_data = data_for_exchanges.tail(period_points)
+                    exchange_values = {c: recent_data[c].mean() for c in exch_cols_national if c in recent_data.columns}
                     nb_points = len(recent_data)
-                    subtitle = f"Moyenne sur {nb_points} points"
+                    subtitle = f"Moyenne sur {nb_points} points - Données nationales"
                 
                 st.caption(subtitle)
                 
@@ -688,14 +800,14 @@ elif app_mode == "RTE Production":
                             # Calcul de l'épaisseur selon l'intensité
                             weight = min(max(2, abs(val) / 500), 8)
                             
-                            # Logique Visuelle (Rouge=Export, Vert=Import)
+                            # ⚡ COULEURS INVERSÉES : Vert=Export, Rouge=Import
                             if val > 0: # IMPORT (Vers la France)
-                                color = 'red'
+                                color = 'red'  # ← INVERSÉ : Rouge pour import
                                 icon_name = 'arrow-down'
                                 tooltip = f"<b>IMPORT</b> depuis {country}<br>Moyenne: {val:,.0f} MW"
                                 folium.PolyLine([coord, coord_fr], color=color, weight=weight, opacity=0.8, dash_array='10').add_to(m)
                             else: # EXPORT (Depuis la France)
-                                color = 'green'
+                                color = 'green'  # ← INVERSÉ : Vert pour export
                                 icon_name = 'arrow-up'
                                 tooltip = f"<b>EXPORT</b> vers {country}<br>Moyenne: {abs(val):,.0f} MW"
                                 folium.PolyLine([coord_fr, coord], color=color, weight=weight, opacity=0.8).add_to(m)
@@ -716,19 +828,19 @@ elif app_mode == "RTE Production":
 
             with c_gauge:
                 st.subheader("⚖️ Solde Import/Export")
-                st.caption(f"Période: {selected_period}")
+                st.caption(f"Période: {selected_period} - Données nationales")
                 
                 # =========================================================
                 # 1. JAUGE PRINCIPALE (GLOBALE) - Adaptée à la période
                 # =========================================================
                 
-                # Calcul du solde net selon la période
+                # Calcul du solde net selon la période (utilise exchange_values des données nationales)
                 net_balance = sum(exchange_values.values()) if exchange_values else 0
                 limit = 15000
                 
-                # Couleurs
-                color_export = "#388E3C" # Vert
-                color_import = "#D32F2F" # Rouge
+                # ⚡ COULEURS INVERSÉES : Vert=Export, Rouge=Import
+                color_export = "#388E3C" # Vert (inversé)
+                color_import = "#D32F2F" # Rouge (inversé)
                 
                 # Logique Remplissage (Step)
                 if net_balance < 0:
