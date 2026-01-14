@@ -633,8 +633,42 @@ elif app_mode == "RTE Production":
             with c_map:
                 st.subheader("🌍 Échanges aux frontières")
                 
+                # Sélecteur de période pour la carte
+                period_options = {
+                    "Dernière valeur (instantané)": 0,
+                    "Dernières 24 heures (moyenne)": 24*4,  # 4 points/heure
+                    "Derniers 7 jours (moyenne)": 7*24*4,
+                    "Derniers 30 jours (moyenne)": 30*24*4,
+                    "Toute la période (moyenne)": -1
+                }
+                
+                selected_period = st.selectbox(
+                    "Période d'analyse des échanges",
+                    options=list(period_options.keys()),
+                    index=0
+                )
+                
+                period_points = period_options[selected_period]
+                
+                # Calcul des valeurs d'échange selon la période
+                if period_points == 0:
+                    # Dernière valeur uniquement
+                    exchange_values = {c: last_row[c] for c in exch_cols if c in last_row.index}
+                    subtitle = "Instantané (dernier point)"
+                elif period_points == -1:
+                    # Toute la période (utiliser 'data' au lieu de 'data_filtered')
+                    exchange_values = {c: data[c].mean() for c in exch_cols if c in data.columns}
+                    subtitle = f"Moyenne sur {len(data)} points"
+                else:
+                    # Derniers N points (utiliser 'data' au lieu de 'data_filtered')
+                    recent_data = data.tail(period_points)
+                    exchange_values = {c: recent_data[c].mean() for c in exch_cols if c in recent_data.columns}
+                    nb_points = len(recent_data)
+                    subtitle = f"Moyenne sur {nb_points} points"
+                
+                st.caption(subtitle)
+                
                 # Carte focalisée "Carré France"
-                # Zoom 6 + Centrage ajusté pour voir les voisins (UK, ES, IT, DE, CH)
                 m = folium.Map(location=[46.5, 2.5], zoom_start=5.25, tiles="CartoDB positron")
                 
                 # Marqueur France
@@ -642,33 +676,36 @@ elif app_mode == "RTE Production":
                              icon=folium.Icon(color='blue', icon='home', prefix='fa')).add_to(m)
 
                 found_exchange = False
-                if exch_cols:
-                    for c in exch_cols:
-                        val = last_row[c]
+                if exchange_values:
+                    for c, val in exchange_values.items():
                         country = c.replace("Ech. comm. ", "").replace("Ech. comm.", "").strip()
                         
-                        if country in COUNTRY_COORDS:
+                        if country in COUNTRY_COORDS and not pd.isna(val):
                             found_exchange = True
                             coord = COUNTRY_COORDS[country]
                             coord_fr = COUNTRY_COORDS['France']
                             
+                            # Calcul de l'épaisseur selon l'intensité
+                            weight = min(max(2, abs(val) / 500), 8)
+                            
                             # Logique Visuelle (Rouge=Export, Vert=Import)
                             if val > 0: # IMPORT (Vers la France)
-                                color = 'green'
-                                icon_name = 'arrow-down'
-                                tooltip = f"IMPORT depuis {country}: {val:,.0f} MW"
-                                folium.PolyLine([coord, coord_fr], color=color, weight=4, opacity=0.8, dash_array='10').add_to(m)
-                            else: # EXPORT (Depuis la France)
                                 color = 'red'
+                                icon_name = 'arrow-down'
+                                tooltip = f"<b>IMPORT</b> depuis {country}<br>Moyenne: {val:,.0f} MW"
+                                folium.PolyLine([coord, coord_fr], color=color, weight=weight, opacity=0.8, dash_array='10').add_to(m)
+                            else: # EXPORT (Depuis la France)
+                                color = 'green'
                                 icon_name = 'arrow-up'
-                                tooltip = f"EXPORT vers {country}: {abs(val):,.0f} MW"
-                                folium.PolyLine([coord_fr, coord], color=color, weight=4, opacity=0.8).add_to(m)
+                                tooltip = f"<b>EXPORT</b> vers {country}<br>Moyenne: {abs(val):,.0f} MW"
+                                folium.PolyLine([coord_fr, coord], color=color, weight=weight, opacity=0.8).add_to(m)
                             
-                            # Marqueur Voisin
+                            # Marqueur Voisin avec info détaillée
                             folium.Marker(
                                 location=coord,
                                 icon=folium.Icon(color=color, icon=icon_name, prefix='fa'),
-                                tooltip=tooltip
+                                tooltip=tooltip,
+                                popup=f"{country}: {val:,.0f} MW ({selected_period})"
                             ).add_to(m)
                 
                 # Hauteur ajustée pour un rendu "Carré" (approx 500px sur écran standard)
@@ -679,17 +716,19 @@ elif app_mode == "RTE Production":
 
             with c_gauge:
                 st.subheader("⚖️ Solde Import/Export")
+                st.caption(f"Période: {selected_period}")
                 
                 # =========================================================
-                # 1. JAUGE PRINCIPALE (GLOBALE) - INCHANGÉE
+                # 1. JAUGE PRINCIPALE (GLOBALE) - Adaptée à la période
                 # =========================================================
                 
-                net_balance = last_row[exch_cols].sum() if exch_cols else 0
+                # Calcul du solde net selon la période
+                net_balance = sum(exchange_values.values()) if exchange_values else 0
                 limit = 15000
                 
                 # Couleurs
-                color_export = "#D32F2F" # Rouge
-                color_import = "#388E3C" # Vert
+                color_export = "#388E3C" # Vert
+                color_import = "#D32F2F" # Rouge
                 
                 # Logique Remplissage (Step)
                 if net_balance < 0:
@@ -741,8 +780,8 @@ elif app_mode == "RTE Production":
                 
                 for i, n in enumerate(neighbors):
                     with cols_mini[i]:
-                        # Récupération valeur
-                        val = last_row.get(n['col'], 0)
+                        # Récupération valeur selon la période choisie
+                        val = exchange_values.get(n['col'], 0)
                         lim = n['lim']
                         
                         # Définition de la "marche" colorée (Step) qui part de 0
