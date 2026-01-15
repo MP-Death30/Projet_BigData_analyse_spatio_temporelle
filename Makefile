@@ -160,6 +160,18 @@ dashboard:
 # GESTION DES DONNÉES
 # ============================================================================
 
+## load-dashboard: Initialiser HDFS et générer les données Météo/Air (Batch)
+load-dashboard:
+	@echo "$(BLUE)🏗️  Initialisation de la structure HDFS...$(NC)"
+	@# On rend le script exécutable et on le lance depuis le notebook (qui a le volume monté)
+	@docker exec -u root pyspark_notebook chmod +x /home/jovyan/work/init_datalake.sh
+	@docker exec pyspark_notebook /home/jovyan/work/init_datalake.sh
+	@echo ""
+	@echo "$(BLUE)🚀 Lancement de l'ETL Batch (Transformation Météo & Air)...$(NC)"
+	@docker exec pyspark_notebook python /home/jovyan/work/etl_batch.py
+	@echo ""
+	@echo "$(GREEN)✅ Données Batch disponibles dans /processed/dashboard/$(NC)"
+
 ## load-national: Charger les données nationales
 load-national:
 	@echo "$(BLUE)📥 Chargement des données nationales RTE...$(NC)"

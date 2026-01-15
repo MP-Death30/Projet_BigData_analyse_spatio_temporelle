@@ -43,6 +43,7 @@ IF "%1"=="quick-restart" GOTO quick_restart
 IF "%1"=="shell-namenode" GOTO shell_namenode
 IF "%1"=="shell-spark" GOTO shell_spark
 IF "%1"=="dev" GOTO dev
+IF "%1"=="load-dashboard" GOTO load_dashboard
 GOTO unknown
 
 REM ============================================================================
@@ -235,6 +236,28 @@ echo   3. Cliquer sur 'Charger Donnees Regionales'
 echo   4. Attendre la sauvegarde HDFS
 echo.
 CALL :dashboard
+GOTO end
+
+:load_dashboard
+echo.
+echo ================================================================
+echo    Initialisation HDFS et ETL Batch
+echo ================================================================
+echo.
+echo [1/3] Preparation du script HDFS...
+REM On envoie le script sur le namenode qui possede la commande 'hdfs'
+docker cp work/init_datalake.sh %HDFS_NAMENODE%:/tmp/init_datalake.sh
+docker exec %HDFS_NAMENODE% chmod +x /tmp/init_datalake.sh
+
+echo [2/3] Creation arborescence HDFS (via Namenode)...
+docker exec %HDFS_NAMENODE% /tmp/init_datalake.sh
+
+echo [3/3] Execution ETL Batch (Transformation via Notebook)...
+docker exec pyspark_notebook spark-submit /home/jovyan/work/etl_batch.py
+
+echo.
+echo [OK] Processus termine. Verifiez le dossier /processed dans l'explorateur HDFS.
+echo.
 GOTO end
 
 REM ============================================================================

@@ -107,18 +107,20 @@ def process_air_quality():
         
     # Nettoyage simple
     # Renommage pour cohérence
+    # Dans la fonction process_air_quality()
+    
     mapping = {
-        'unique_id': 'GEOJOIN_ID',
-        'indicator_id': 'INDICATOR_ID',
-        'name': 'NOM_POLLUANT',
-        'measure': 'MESURE',
-        'measure_info': 'UNITÉ',
-        'geo_type_name': 'TYPE_ZONE',
-        'geo_join_id': 'GEOCODE',
-        'geo_place_name': 'GEONAME',
-        'time_period': 'PERIODE',
-        'start_date': 'DATE_OBSERVATION',
-        'data_value': 'VALEUR'
+        8: 'GEOJOIN_ID',
+        9: 'INDICATOR_ID',
+        10: 'NOM_POLLUANT',
+        11: 'MESURE',
+        12: 'UNITÉ',
+        13: 'TYPE_ZONE',
+        14: 'GEOCODE',
+        15: 'GEONAME',
+        16: 'PERIODE',
+        17: 'DATE_OBSERVATION',
+        18: 'VALEUR'
     }
     df_air = df_air.rename(columns=mapping)
     
