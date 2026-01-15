@@ -25,6 +25,7 @@ def get_spark_session():
     return SparkSession.builder \
         .appName("Dashboard_NYC_RTE") \
         .master("spark://spark-master:7077") \
+        .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
         .getOrCreate()
 # ------------------------------------------------------
 
@@ -83,6 +84,7 @@ if app_mode == "NYC Air Quality":
         spark = get_spark_session()
         hdfs_base = "/user/mathis/datalake/processed/dashboard"
         
+        
         # Lecture HDFS via Spark
         # Note : On lit et on convertit en Pandas pour l'affichage
         try:
@@ -93,7 +95,7 @@ if app_mode == "NYC Air Quality":
             st.stop()
             
         # Lecture GeoJSON local (fichier statique)
-        geo = gpd.read_file("dashboard_map.geojson")
+        geo = gpd.read_file("/home/jovyan/work/dashboard_map.geojson")
         
         # Nettoyage & Typage
         geo['GEOCODE'] = geo['GEOCODE'].astype(str)
@@ -113,6 +115,12 @@ if app_mode == "NYC Air Quality":
         if 'DATE' in weather.columns:
             weather['DATE'] = pd.to_datetime(weather['DATE'])
         
+        # On convertit les colonnes "texte" en "nombres" avant les calculs
+        cols_to_convert = ['TEMP', 'DEWP', 'WDSP', 'LATITUDE', 'LONGITUDE']
+        for col in cols_to_convert:
+            if col in weather.columns:
+                weather[col] = pd.to_numeric(weather[col], errors='coerce')
+                
         # Conversions Météo
         if 'TEMP' in weather.columns:
             weather['TEMP'] = (weather['TEMP'] - 32) * 5.0/9.0
@@ -248,10 +256,27 @@ if app_mode == "NYC Air Quality":
 
         # Préparation Données Carte
         df_air_map = df_air_filtered[df_air_filtered['NOM_POLLUANT'] == selected_polluant]
+        
         if not df_air_map.empty:
-            air_agg = df_air_map.groupby('GEOJOIN_ID')['VALEUR'].mean().reset_index()
+            # CORRECTION 1 : On groupe par 'GEOCODE' (si dispo) ou on s'assure que l'ID est propre
+            # On privilégie la colonne 'GEOCODE' issue de l'ETL si elle existe, sinon GEOJOIN_ID
+            group_col = 'GEOCODE' if 'GEOCODE' in df_air_map.columns else 'GEOJOIN_ID'
+            
+            air_agg = df_air_map.groupby(group_col)['VALEUR'].mean().reset_index()
             air_agg.columns = ['GEOCODE', 'MEAN_POLLUANT']
-            air_agg['GEOCODE'] = air_agg['GEOCODE'].astype(str)
+            
+            # CORRECTION 2 : Nettoyage drastique des IDs pour matcher le GeoJSON
+            # On convertit en float puis int pour virer le ".0", puis en string
+            def clean_id(x):
+                try:
+                    return str(int(float(x)))
+                except:
+                    return str(x)
+            
+            air_agg['GEOCODE'] = air_agg['GEOCODE'].apply(clean_id)
+            # On applique le même nettoyage au GeoJSON pour être sûr
+            geo['GEOCODE'] = geo['GEOCODE'].apply(clean_id)
+            
         else:
             air_agg = pd.DataFrame(columns=['GEOCODE', 'MEAN_POLLUANT'])
 

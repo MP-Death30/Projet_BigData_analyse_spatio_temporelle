@@ -18,13 +18,12 @@ print("🚀 Démarrage du Script ETL Batch...")
 
 # Définition des Chemins
 LOCAL_DATA_DIR = "/home/jovyan/work/data"
-NOAA_DIR = os.path.join(LOCAL_DATA_DIR, "noaa_gsod", "2022")
 AIR_FILE = os.path.join(LOCAL_DATA_DIR, "air_quality", "nyc_air_quality_raw.json")
 
 # URLs (au cas où les fichiers locaux manquent)
 URL_AIR_NYC = "https://data.cityofnewyork.us/resource/c3uy-2p5r.json?$limit=50000"
 
-# Initialisation Spark (Optimisée)
+# Initialisation Spark (Optimisée pour HDFS)
 spark = SparkSession.builder \
     .appName("ETL_Batch_NYC_Weather") \
     .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
@@ -34,63 +33,103 @@ spark = SparkSession.builder \
 print("✅ Session Spark initialisée.")
 
 # ==============================================================================
+# 0. SAUVEGARDE DES DONNÉES BRUTES (RAW)
+# ==============================================================================
+def upload_raw_folder_to_hdfs(local_dir, hdfs_target_dir):
+    """
+    Copie le dossier local complet vers HDFS (Zone Raw)
+    """
+    print(f"\n📦 Vérification et Upload des données brutes : {local_dir} -> {hdfs_target_dir}")
+    
+    if not os.path.exists(local_dir):
+        print(f"⚠️  Le dossier local source {local_dir} n'existe pas. Upload ignoré.")
+        return
+
+    # Accès au système de fichiers Hadoop via la JVM Spark
+    try:
+        sc = spark.sparkContext
+        jvm = sc._gateway.jvm
+        conf = sc._jsc.hadoopConfiguration()
+        fs = jvm.org.apache.hadoop.fs.FileSystem.get(conf)
+        Path = jvm.org.apache.hadoop.fs.Path
+        
+        src_path = Path(local_dir)
+        dst_path = Path(hdfs_target_dir)
+        
+        # Copie (overwrite=True pour s'assurer que les données sont à jour)
+        fs.copyFromLocalFile(False, True, src_path, dst_path)
+        print("✅ Dossier 'data' (Raw) synchronisé dans HDFS.")
+        
+    except Exception as e:
+        print(f"❌ Erreur lors de l'upload Raw : {e}")
+
+# ==============================================================================
 # 2. TRAITEMENT MÉTÉO (NOAA)
 # ==============================================================================
-def process_weather():
-    print("\n🌤️  Traitement des données Météo (NOAA 2022)...")
+def process_weather(years):
+    print(f"\n🌤️  Traitement des données Météo (NOAA) pour {len(years)} années...")
     
-    # Récupération des fichiers CSV locaux
-    all_files = glob.glob(os.path.join(NOAA_DIR, "*.csv"))
-    
-    if not all_files:
-        print("⚠️  Aucun fichier CSV trouvé dans work/data/noaa_gsod/2022/")
-        print("   -> Assurez-vous d'avoir téléchargé les données ou lancez le script de scraping.")
-        return pd.DataFrame()
-
-    print(f"   -> {len(all_files)} stations trouvées localement.")
-    
-    # Lecture et Concatenation avec Pandas
     dfs = []
-    for filename in all_files:
-        try:
-            # On lit en forçant tout en string pour éviter les erreurs de typage initiales
-            df = pd.read_csv(filename, dtype=str)
-            dfs.append(df)
-        except Exception as e:
-            print(f"   [Erreur lecture] {os.path.basename(filename)}: {e}")
+    
+    for year in years:
+        # Construction dynamique du chemin pour l'année
+        year_dir = os.path.join(LOCAL_DATA_DIR, "noaa_gsod", str(year))
+        
+        # --- VERIFICATION CRITIQUE ---
+        if not os.path.exists(year_dir):
+            # Message informatif simple, pas d'erreur
+            print(f"⚠️  Année {year} non trouvée (Dossier absent).")
+            continue
+        # -----------------------------
+
+        # Récupération des fichiers CSV locaux
+        files = glob.glob(os.path.join(year_dir, "*.csv"))
+        
+        if not files:
+            print(f"⚠️  Dossier vide pour l'année {year}.")
+            continue
+
+        print(f"   -> Année {year} : {len(files)} stations trouvées.")
+        
+        # Lecture
+        for filename in files:
+            try:
+                # Lecture en String pour éviter les erreurs de schéma initiales
+                df = pd.read_csv(filename, dtype=str)
+                dfs.append(df)
+            except Exception as e:
+                print(f"   [Erreur lecture] {os.path.basename(filename)}: {e}")
 
     if not dfs:
+        print("⚠️  Aucune donnée météo valide n'a été chargée sur toute la période.")
         return pd.DataFrame()
 
+    print("⏳ Concatenation des données météo...")
     df_weather = pd.concat(dfs, ignore_index=True)
     
-    # Nettoyage Rapide
-    # On garde les colonnes utiles
+    # Nettoyage Rapide : Sélection des colonnes
     cols_to_keep = ['STATION', 'DATE', 'LATITUDE', 'LONGITUDE', 'NAME', 'TEMP', 'DEWP', 'WDSP']
-    # On filtre celles qui existent vraiment
     cols_exist = [c for c in cols_to_keep if c in df_weather.columns]
     df_weather = df_weather[cols_exist]
 
-    # Standardisation
-    df_weather['ID_STATION'] = df_weather['STATION']
+    # Standardisation ID
+    if 'STATION' in df_weather.columns:
+        df_weather['ID_STATION'] = df_weather['STATION']
     
-    # Note : Les conversions (Fahrenheit->Celsius) sont faites dans app.py à la lecture.
-    # Ici on stocke la donnée brute consolidée.
-    
-    print(f"✅ Météo consolidée : {len(df_weather)} enregistrements.")
+    print(f"✅ Météo consolidée (2005-2023) : {len(df_weather)} enregistrements.")
     return df_weather
 
 # ==============================================================================
 # 3. TRAITEMENT QUALITÉ DE L'AIR (NYC)
 # ==============================================================================
 def process_air_quality():
-    print("Traitement Qualité de l'Air (NYC OpenData)...")
+    print("\n💨 Traitement Qualité de l'Air (NYC OpenData)...")
     
     # Vérification fichier local, sinon téléchargement
     if not os.path.exists(AIR_FILE):
         print("   -> Fichier local absent. Téléchargement...")
-        os.makedirs(os.path.dirname(AIR_FILE), exist_ok=True)
         try:
+            os.makedirs(os.path.dirname(AIR_FILE), exist_ok=True)
             r = requests.get(URL_AIR_NYC, timeout=30)
             with open(AIR_FILE, 'wb') as f:
                 f.write(r.content)
@@ -102,13 +141,10 @@ def process_air_quality():
     try:
         df_air = pd.read_json(AIR_FILE)
     except ValueError:
-        print("❌ Erreur lecture JSON Air Quality.")
+        print("❌ Erreur lecture JSON Air Quality (Format invalide).")
         return pd.DataFrame()
         
-    # Nettoyage simple
-    # Renommage pour cohérence
-    # Dans la fonction process_air_quality()
-    
+    # Nettoyage & Mapping (Gestion du format List of Lists)
     mapping = {
         8: 'GEOJOIN_ID',
         9: 'INDICATOR_ID',
@@ -122,17 +158,23 @@ def process_air_quality():
         17: 'DATE_OBSERVATION',
         18: 'VALEUR'
     }
+    
+    # Renommage
     df_air = df_air.rename(columns=mapping)
     
-    # On ne garde que les colonnes renommées qui existent
-    cols_final = [c for c in mapping.values() if c in df_air.columns]
+    # Sélection (Unicité des colonnes pour éviter l'erreur "already used")
+    cols_final = list(set(mapping.values()))
+    
+    # Filtrer pour ne garder que les colonnes qui existent vraiment dans le DF
+    cols_final = [c for c in cols_final if c in df_air.columns]
+    
     df_air = df_air[cols_final]
     
     print(f"✅ Qualité Air traitée : {len(df_air)} enregistrements.")
     return df_air
 
 # ==============================================================================
-# 4. EXPORT VERS HDFS (DATALAKE)
+# 4. EXPORT VERS HDFS (DATALAKE PROCESSED)
 # ==============================================================================
 def save_to_hdfs(pandas_df, hdfs_filename):
     if pandas_df.empty:
@@ -165,8 +207,14 @@ def save_to_hdfs(pandas_df, hdfs_filename):
 # ==============================================================================
 if __name__ == "__main__":
     
-    # 1. Pipeline Météo
-    df_w = process_weather()
+    # 0. Upload des Raw Data (Backup)
+    upload_raw_folder_to_hdfs(LOCAL_DATA_DIR, "/user/mathis/datalake/raw")
+
+    # 1. Pipeline Météo (Plage dynamique 2005-2023)
+    # Génération automatique de la liste ['2005', '2006', ..., '2023']
+    target_years = [str(year) for year in range(2005, 2024)]
+    
+    df_w = process_weather(years=target_years) 
     save_to_hdfs(df_w, "weather.parquet")
     
     # 2. Pipeline Air
