@@ -84,7 +84,7 @@ def process_weather():
 # 3. TRAITEMENT QUALITÉ DE L'AIR (NYC)
 # ==============================================================================
 def process_air_quality():
-    print("\nmask️  Traitement Qualité de l'Air (NYC OpenData)...")
+    print("Traitement Qualité de l'Air (NYC OpenData)...")
     
     # Vérification fichier local, sinon téléchargement
     if not os.path.exists(AIR_FILE):

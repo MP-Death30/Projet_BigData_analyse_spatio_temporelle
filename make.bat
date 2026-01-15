@@ -58,6 +58,7 @@ echo.
 echo DEMARRAGE RAPIDE:
 echo   make init              - Initialisation complete
 echo   make start             - Demarrer tous les services
+echo   make run               - Lancer le dashboard dans le container
 echo   make dashboard         - Ouvrir le dashboard
 echo.
 echo GESTION DES SERVICES:
@@ -86,10 +87,6 @@ echo   make quick-restart     - Redemarrage rapide
 echo   make shell-namenode    - Shell dans namenode
 echo   make shell-spark       - Shell dans PySpark
 echo   make dev               - Mode developpement
-echo.
-echo EXEMPLE:
-echo   make init
-echo   make dashboard
 echo.
 GOTO end
 
@@ -175,7 +172,7 @@ GOTO end
 
 :restart
 echo Redemarrage des containers...
-CALL :down
+CALL :clean
 timeout /t 2 /nobreak >nul
 CALL :up
 echo [OK] Containers redemarres

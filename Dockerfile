@@ -1,5 +1,5 @@
 # On part de l'image de base
-FROM jupyter/pyspark-notebook
+FROM jupyter/pyspark-notebook:spark-3.3.0
 
 # On passe en root pour installer les dépendances système si nécessaire
 USER root

@@ -60,11 +60,11 @@ cd projet_bigdata_analyse_spatio_temporelle
 Cette commande construit les images Docker, lance les conteneurs et initialise les données (ETL).
 * **Sous Linux / Mac :**
     ``` bash
-    make install
+    make init
     ```
 * **Sous Windows (PowerShell) :**
     ``` powershell
-    .\make install
+    .\make init
     ```
     *(Cela va exécuter `build-images.sh`, lancer `docker-compose up`, et exécuter les scripts d'initialisation dans le conteneur)*
 

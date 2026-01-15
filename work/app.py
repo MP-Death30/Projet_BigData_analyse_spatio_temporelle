@@ -20,13 +20,11 @@ st.set_page_config(layout="wide", page_title="Big Data Dashboard")
 
 # --- CORRECTION : SESSION SPARK DÉFINIE GLOBALEMENT ---
 # Indispensable pour être accessible par NYC (Batch) ET RTE (Speed/Ingestion)
-@st.cache_resource
 def get_spark_session():
     # On force une configuration minimale pour éviter les conflits Java
     return SparkSession.builder \
         .appName("Dashboard_NYC_RTE") \
-        .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
-        .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+        .master("spark://spark-master:7077") \
         .getOrCreate()
 # ------------------------------------------------------
 
@@ -81,7 +79,6 @@ if app_mode == "NYC Air Quality":
         st.session_state.dropdown_selector = "Tous quartiers"
 
     # 1. FONCTIONS CHARGEMENT & CALCULS
-    @st.cache_data
     def load_data():
         spark = get_spark_session()
         hdfs_base = "/user/mathis/datalake/processed/dashboard"

@@ -1,5 +1,5 @@
 pandas
-numpy
+numpy==1.23.5
 geopandas
 streamlit
 streamlit-folium
@@ -9,4 +9,4 @@ requests
 pyarrow
 requests
 openpyxl
-pyspark
+pyspark==3.3.0
